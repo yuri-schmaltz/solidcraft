@@ -861,6 +861,21 @@ Original SolidCraft drawings, Open for owner review; no runtime assignments.
 | assets/fonts/craft-ui-kr/OFL.txt | Adobe / Google Inc. (Noto CJK); SolidCraft header | Accompanying OFL for CraftUI-KR.otf | SIL OFL 1.1 |
 | `assets/locales/pending/names-from-file.json` | SolidCraft contributors | Original label for the names-from-file preference | MIT OR Apache-2.0 |
 | `assets/locales/pending/snap-points.json` | SolidCraft contributors | Original snap point labels and messages | MIT OR Apache-2.0 |
+| crates/look/icons/design/svg/model/constrain.svg | SolidCraft contributors | two-tone modelling icon master (64 grid), original SolidCraft artwork | SolidCraft Brand and Interface Licence (LICENSE-BRAND) |
+| assets/locales/pending/dxf-zero-point.json | SolidCraft contributors | Original DXF export zero-point dialog strings and translations | MIT OR Apache-2.0 |
+| crates/look/icons/design/svg/flat/panel_dock_bottom.svg | SolidCraft contributors | original flat panel menu icon master (64 grid) | SolidCraft Brand and Interface Licence (LICENSE-BRAND) |
+| crates/look/icons/design/svg/flat/panel_dock_left.svg | SolidCraft contributors | original flat panel menu icon master (64 grid) | SolidCraft Brand and Interface Licence (LICENSE-BRAND) |
+| crates/look/icons/design/svg/flat/panel_dock_right.svg | SolidCraft contributors | original flat panel menu icon master (64 grid) | SolidCraft Brand and Interface Licence (LICENSE-BRAND) |
+| crates/look/icons/design/svg/flat/panel_float.svg | SolidCraft contributors | original flat panel menu icon master (64 grid) | SolidCraft Brand and Interface Licence (LICENSE-BRAND) |
+| crates/look/icons/design/svg/flat/panel_popout.svg | SolidCraft contributors | original flat panel menu icon master (64 grid) | SolidCraft Brand and Interface Licence (LICENSE-BRAND) |
+| `crates/craft-plugin-wasm/src/fixture.wat` | SolidCraft contributors | Original command-component test fixture adapted for an app-independent test host | MIT OR Apache-2.0 |
+| `crates/craft-plugin/wit/plugin.wit` | SolidCraft contributors; command-world proposal by SychPL | [PR #4980, revision 1054995](https://github.com/tangency-labs/solidcraft/pull/4980) (adapted command world; generic host additions by SolidCraft contributors) | MIT OR Apache-2.0 |
+| `crates/engine/src/plugin/fixture.wat` | SolidCraft contributors | Original command-component test fixture; encoded with wasm-tools | MIT OR Apache-2.0 |
+| `crates/ui-egui/src/plugin_fixture.wat` | SolidCraft contributors | Original no-op command-component test fixture; encoded with wasm-tools | MIT OR Apache-2.0 |
+| `assets/locales/pending/plugin-resource-limits.json` | SolidCraft contributors | Original plugin UI messages and translations | MIT OR Apache-2.0 |
+| `assets/locales/pending/plugin-runtime.json` | SolidCraft contributors | Original plugin UI messages and translations | MIT OR Apache-2.0 |
+| `assets/locales/pending/plugin-shared-host.json` | SolidCraft contributors | Original plugin UI messages and translations | MIT OR Apache-2.0 |
+| tests/step-regressions/tiny_rounds_coarse_tolerance.step | SolidCraft contributors | written entity by entity from formulas (a 0.05 mm quarter round, corner ball and quarter torus in a file of 0.1 mm uncertainty); import regression fixture | MIT OR Apache-2.0 |
 
 ## Code adapted from sibling projects
 
