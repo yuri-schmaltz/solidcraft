@@ -11,8 +11,6 @@ use crate::{KernelError, Result, guard};
 mod planar_regularize;
 #[path = "planar_sources.rs"]
 mod planar_sources;
-#[path = "shell_groups.rs"]
-pub(crate) mod shell_groups;
 
 /// A solid body (one or more closed shells), or a mesh body (triangles only, like an imported
 /// 3MF or STL: it renders, measures and exports, but B-rep features cannot use it). Cheap to
@@ -1635,36 +1633,20 @@ impl Body {
     }
 
     /// Faces with area and centroid.
-    pub fn faces(&self, tol: f64) -> Result<Vec<FaceInfo>> {
-        let m = self.mesh(&MeshTolerance::chord(tol))?;
-        let nf = self.face_count();
-        let mut acc: Vec<(f64, Vec3, Vec3, bool)> = vec![(0.0, Vec3::ZERO, Vec3::ZERO, true); nf];
-        for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-            let Some([a, b, c]) = m.tri(t) else { continue };
-            let cr = (b - a).cross(c - a);
-            let ar = cr.len() * 0.5;
-            if let Some(slot) = acc.get_mut(*f as usize) {
-                slot.0 += ar;
-                slot.1 += (a + b + c) * (ar / 3.0);
-                if let Some(n) = cr.normalized() {
-                    if slot.2 == Vec3::ZERO {
-                        slot.2 = n;
-                    } else if slot.2.dot(n) < 1.0 - 1e-6 {
-                        slot.3 = false;
-                    }
-                }
-            }
+    pub fn faces(&self, _tol: f64) -> Result<Vec<FaceInfo>> {
+        let Some((ops, order)) = self.ops_body() else {
+            return Ok(Vec::new());
+        };
+        let mut out = Vec::with_capacity(self.face_count());
+        for index in 0..self.face_count() {
+            let (area, centroid) = match ops.face_centroid(order, index, 1e-4) {
+                Ok(c) => (c.area, Vec3::new(c.centroid[0], c.centroid[1], c.centroid[2])),
+                Err(_) => (0.0, Vec3::ZERO),
+            };
+            let plane_normal = ops.face_plane_normal(order, index).ok().flatten().map(|n| Vec3::new(n.value[0], n.value[1], n.value[2]));
+            out.push(FaceInfo { index, area, centroid, plane_normal });
         }
-        Ok(acc
-            .into_iter()
-            .enumerate()
-            .map(|(index, (area, c, n, planar))| FaceInfo {
-                index,
-                area,
-                centroid: if area > 0.0 { c / area } else { Vec3::ZERO },
-                plane_normal: (planar && n != Vec3::ZERO).then_some(n),
-            })
-            .collect())
+        Ok(out)
     }
 
     /// Index of the edge closest to `p` (by polyline distance).
@@ -1857,40 +1839,32 @@ impl Body {
             .collect()
     }
 
-    /// Whether this body and `other` share material or touch (within a fine mesh tolerance).
+    /// Whether this body and `other` share material or touch (exact B-rep contact test).
     pub fn meets(&self, other: &Body) -> Result<bool> {
         self.require_brep("contact test")?;
         other.require_brep("contact test")?;
+        let (a, _) = self.ops_body().ok_or_else(|| KernelError::Invalid("contact test requires a B-rep body".into()))?;
+        let (b, _) = other.ops_body().ok_or_else(|| KernelError::Invalid("contact test requires a B-rep body".into()))?;
         let tol = (self.size().max(other.size()) * 1e-4).max(1e-6);
-        let (a, b) = (self.mesh(&MeshTolerance::chord(tol))?, other.mesh(&MeshTolerance::chord(tol))?);
-        shell_groups::meshes_meet(&a, &b, 2.0 * tol)
+        a.meets(b, 2.0 * tol).map_err(|e| KernelError::Failed(e.to_string()))
     }
 
-    /// The same contact test for several tools, reusing this unchanged body's
-    /// fine mesh at each required tolerance. No contact threshold is relaxed.
+    /// The same contact test for several tools, preparing this body once.
     pub fn meets_each(&self, others: &[Body]) -> Result<Vec<bool>> {
         if others.len() > 1024 {
             return Err(KernelError::Invalid("too many contact tools".into()));
         }
         self.require_brep("contact test")?;
+        let (a, _) = self.ops_body().ok_or_else(|| KernelError::Invalid("contact test requires a B-rep body".into()))?;
         let size = self.size();
-        let mut meshes = std::collections::HashMap::new();
-        let mut contacts = Vec::with_capacity(others.len());
+        let mut pairs = Vec::with_capacity(others.len());
         for other in others {
             other.require_brep("contact test")?;
+            let (b, _) = other.ops_body().ok_or_else(|| KernelError::Invalid("contact test requires a B-rep body".into()))?;
             let tol = (size.max(other.size()) * 1e-4).max(1e-6);
-            let key = tol.to_bits();
-            if !meshes.contains_key(&key) {
-                // Bound retained meshes even when hostile inputs request many tolerances.
-                if meshes.len() == 16 {
-                    meshes.clear();
-                }
-                meshes.insert(key, self.mesh(&MeshTolerance::chord(tol))?);
-            }
-            let mesh = meshes.get(&key).ok_or_else(|| KernelError::Internal("contact mesh disappeared".into()))?;
-            contacts.push(shell_groups::meshes_meet(mesh, &other.mesh(&MeshTolerance::chord(tol))?, 2.0 * tol)?);
+            pairs.push((b, 2.0 * tol));
         }
-        Ok(contacts)
+        a.meets_each(&pairs).map_err(|e| KernelError::Failed(e.to_string()))
     }
 }
 
