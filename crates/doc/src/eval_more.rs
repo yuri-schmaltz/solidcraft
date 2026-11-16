@@ -326,12 +326,11 @@ fn rib_tool(st: &ModelState, ss: &SolvedSketch, ids: &[String], t: f64, depth: O
     let pts = chain_points(ss, ids)?;
     let (Some(a), Some(b)) = (pts.first().copied(), pts.last().copied()) else { return Err(DocError::Invalid("empty rib curve".into())) };
     let chord = (b - a).normalized().ok_or_else(|| DocError::Invalid("a closed or zero-length rib curve".into()))?;
-    let meshes: Vec<_> = st.bodies.iter().map(|b| b.mesh()).collect();
-    let reach = meshes.iter().map(|m| m.bounds()).fold(0.0f64, |acc, bb| acc.max((bb.max - bb.min).len()));
+    let reach = st.bodies.iter().map(|b| b.outline_bounds()).fold(0.0f64, |acc, bb| acc.max((bb.max - bb.min).len()));
     let tol = 1e-7 * (1.0 + reach);
     let inside = |q: Vec2| {
         let w = ss.plane.to_world(q);
-        meshes.iter().any(|m| m.contains(w))
+        st.bodies.iter().any(|b| b.body.contains(w))
     };
     // Where the body begins and ends again from `q` along `d` (a unit direction in the plane),
     // up to `limit`: the ray's crossings of the bodies' surfaces, with the first beyond `limit`,
@@ -340,10 +339,10 @@ fn rib_tool(st: &ModelState, ss: &SolvedSketch, ids: &[String], t: f64, depth: O
     let entry = |q: Vec2, d: Vec2, limit: f64| -> Option<(f64, f64)> {
         let (o, dir) = (ss.plane.to_world(q), ss.plane.dir_to_world(d));
         let mut cuts = Vec::new();
-        for m in &meshes {
+        for b in &st.bodies {
             let mut from = 0.0;
             while cuts.len() < 4096 {
-                let Some((s, _)) = m.raycast(o + dir * from, dir) else { break };
+                let Some((s, _)) = b.body.raycast_face(o + dir * from, dir) else { break };
                 from += s;
                 cuts.push(from);
                 if !(from <= limit) {
@@ -428,10 +427,9 @@ fn rib_tool_normal(st: &ModelState, ss: &SolvedSketch, ids: &[String], t: f64, d
     let samples = ((len / (t * 0.5).max(len / 400.0)).ceil() as usize).clamp(2, 400);
     let along: Vec<Vec3> = (0..=samples).map(|k| ss.plane.to_world(point_on_polyline(&pts, len * k as f64 / samples as f64))).collect();
     let normal = ss.plane.normal();
-    let meshes: Vec<_> = st.bodies.iter().map(|b| b.mesh()).collect();
-    let reach = meshes.iter().map(|m| m.bounds()).fold(0.0f64, |acc, bb| acc.max((bb.max - bb.min).len()));
+    let reach = st.bodies.iter().map(|b| b.outline_bounds()).fold(0.0f64, |acc, bb| acc.max((bb.max - bb.min).len()));
     let tol = 1e-7 * (1.0 + reach);
-    let inside = |q: Vec3| meshes.iter().any(|m| m.contains(q));
+    let inside = |q: Vec3| st.bodies.iter().any(|b| b.body.contains(q));
     // Where the body begins from each point of the curves, along `sign` × the sketch normal:
     // the ray's crossings of the bodies' surfaces, each span between two tested at its middle,
     // so no thin wall is stepped over (#16874).
@@ -442,10 +440,10 @@ fn rib_tool_normal(st: &ModelState, ss: &SolvedSketch, ids: &[String], t: f64, d
         let mut out = Vec::new();
         for q in &along {
             let mut cuts = Vec::new();
-            for m in &meshes {
+            for b in &st.bodies {
                 let mut from = 0.0;
                 while cuts.len() < 4096 {
-                    let Some((s, _)) = m.raycast(*q + dir * from, dir) else { break };
+                    let Some((s, _)) = b.body.raycast_face(*q + dir * from, dir) else { break };
                     from += s;
                     cuts.push(from);
                     if !(from <= limit) {
@@ -1048,30 +1046,21 @@ pub(super) fn sheet_eval(
         FeatureKind::SheetConvert { body, face, rule, .. } => {
             let mb = st.body(body).cloned().ok_or_else(|| DocError::Unknown(format!("body `{body}`")))?;
             let n = planar_normal_at(&mb.body, face.0).ok_or_else(|| DocError::Invalid("pick a planar face of the plate".into()))?;
-            // Thickness: the body's extent along the face normal.
-            let extent = |mesh: &solidcraft_geom::Mesh| {
-                mesh.positions.iter().map(|p| (*p - face.0).dot(n)).fold((f64::MAX, f64::MIN), |(lo, hi), d| (lo.min(d), hi.max(d)))
-            };
-            // The tolerance (the mesh's chords, and how far off the face's plane a point of it may
-            // be) is at most a tenth of the thickness, not only a thousandth of the size. On a long
-            // thin plate that thousandth passes the thickness: the far side's triangles counted as
-            // this face's (no outline was left), and a hole of a smaller radius than that fell out.
             let mut tol = (mb.body.size() * 1e-3).max(1e-3);
-            let mut mesh = mb.body.mesh(&solidcraft_kernel::MeshTolerance::chord(tol))?;
-            let (mut lo, mut hi) = extent(&mesh);
+            let (lo, hi) = mb
+                .body
+                .edge_faces_and_points()
+                .into_iter()
+                .flat_map(|(_, pts)| pts)
+                .chain((0..mb.body.face_count()).filter_map(|f| mb.body.face_internal_point(f)))
+                .map(|p| (p - face.0).dot(n))
+                .fold((f64::MAX, f64::MIN), |(lo, hi), d| (lo.min(d), hi.max(d)));
             if hi - lo > 0.0 && tol > (hi - lo) * 0.1 {
                 tol = ((hi - lo) * 0.1).max(1e-6);
-                mesh = mb.body.mesh(&solidcraft_kernel::MeshTolerance::chord(tol))?;
-                (lo, hi) = extent(&mesh);
             }
             let t = hi - lo;
-            // The face outline: boundary edges of the triangles on that face's plane, where it runs
-            // along a round wall an arc of the wall's circle (not chords: the plate check below
-            // compares its area with the exact volume). The sheet's frame lies on the picked face
-            // (its outer level, `hi`) with z into the material, as with bend edges, so the sheet
-            // takes the plate's place: its thickness runs from `hi` back to `lo`.
             let plane = Plane::from_normal(face.0 + n * hi, n * -1.0).ok_or_else(|| DocError::Invalid("face".into()))?;
-            let slice = FaceSlice { mesh: &mesh, plane, at: face.0, n, tol };
+            let slice = FaceSlice { body: &mb.body, plane, at: face.0, n, tol };
             // Recesses in one face (an engraved label) become pockets; the outline is the other face's.
             let recesses = slice.recesses(&mb.body, (lo, hi))?;
             let mut walls = std::collections::HashMap::new();
@@ -2120,7 +2109,7 @@ fn parted_note(sh: &sheet::SheetBody, material: &[Region2], before: &sheet::Shee
 /// are measured from, and the tolerance. Callers build it once and pass it on unchanged.
 /// (`n` stays a `Vec3` until #2675 lands `UnitVec3` upstream.)
 struct FaceSlice<'a> {
-    mesh: &'a Mesh,
+    body: &'a Body,
     plane: Plane,
     at: Vec3,
     n: Vec3,
@@ -2128,93 +2117,65 @@ struct FaceSlice<'a> {
 }
 
 impl FaceSlice<'_> {
-    /// Outline loops (in `plane` coordinates) of the mesh triangles lying in the plane at distance
+    /// Outline loops (in `plane` coordinates) of the faces lying in the plane at distance
     /// `level` from `at` along `n`: the edges used by one of them only, chained.
     fn loops(&self, level: f64) -> Vec<Ring<Vec2>> {
         self.outline(level).into_iter().map(|l| l.into_iter().map(|(p, _)| p).collect()).collect()
     }
 
     /// [`FaceSlice::loops`] with each point's B-rep face across the outline from it to the next
-    /// point (the wall the outline runs along there): the face off the plane that meets both points.
+    /// point (the wall the outline runs along there).
     fn outline(&self, level: f64) -> Vec<Vec<(Vec2, Option<u32>)>> {
-        let (mesh, plane, at, n, tol) = (self.mesh, &self.plane, self.at, self.n, self.tol);
-        let on_plane = |t: &[u32; 3]| t.iter().all(|k| mesh.positions.get(*k as usize).is_some_and(|p| ((*p - at).dot(n) - level).abs() < tol));
-        let on: Vec<[u32; 3]> = mesh.triangles.iter().copied().filter(on_plane).collect();
-        let pos = |k: u32| mesh.positions.get(k as usize).copied().unwrap_or_default();
-        let q = |p: Vec3| ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64, (p.z * 1e6).round() as i64);
-        // The faces off the plane at each point on it, by position to a millionth of a millimetre
-        // either way (a neighbouring face's mesh may round a shared point differently).
-        let mut touch: std::collections::HashMap<(i64, i64, i64), Vec<u32>> = Default::default();
-        for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face).filter(|(t, _)| !on_plane(t)) {
-            for p in t.iter().map(|k| pos(*k)).filter(|p| ((*p - at).dot(n) - level).abs() < tol) {
-                let faces = touch.entry(q(p)).or_default();
-                if !faces.contains(f) {
-                    faces.push(*f);
+        let on_faces: std::collections::HashSet<usize> = (0..self.body.face_count())
+            .filter(|&f| {
+                let Some(kernel::FaceSurface::Plane { normal, point }) = kernel::face_surface(self.body, f) else { return false };
+                if normal.cross(self.n).len() >= 1e-5 {
+                    return false;
                 }
-            }
+                let p = self.body.face_internal_point(f).unwrap_or(point);
+                ((p - self.at).dot(self.n) - level).abs() < self.tol
+            })
+            .collect();
+        chain_brep_edges(self.body, &self.plane, &on_faces, self.tol, self.tol)
+    }
+}
+
+/// The loops (in `plane` coordinates) that bound the faces `on_faces` of `body`, each point with
+/// the face across the outline from it to the next point.
+fn chain_brep_edges(body: &Body, plane: &Plane, on_faces: &std::collections::HashSet<usize>, chord: f64, tol: f64) -> Vec<Vec<(Vec2, Option<u32>)>> {
+    let Ok(edge_infos) = body.edges(chord.max(1e-4)) else { return Vec::new() };
+    let rec = body.record();
+    let mut edges: Vec<(Vec<Vec3>, Option<u32>)> = Vec::new();
+    for info in edge_infos {
+        if info.points.len() < 2 {
+            continue;
         }
-        let near = |p: Vec3| {
-            let (x, y, z) = q(p);
-            let cells = (-1..=1).flat_map(|i| (-1..=1).flat_map(move |j| (-1..=1).map(move |k| (x + i, y + j, z + k))));
-            let mut faces: Vec<u32> = cells.filter_map(|c| touch.get(&c)).flatten().copied().collect();
-            faces.sort_unstable();
-            faces.dedup();
-            faces
-        };
-        let across = |a: Vec3, b: Vec3| {
-            let at_b = near(b);
-            near(a).into_iter().find(|f| at_b.contains(f))
-        };
-        chain_loops(mesh, plane, &on, across)
+        let mut fs: Vec<u32> = rec.edges.get(info.index).map(|e| e.uses.iter().map(|u| u.face).collect()).unwrap_or_default();
+        fs.sort_unstable();
+        fs.dedup();
+        let on_count = fs.iter().filter(|f| on_faces.contains(&(**f as usize))).count();
+        if on_count != 1 {
+            continue;
+        }
+        let across = fs.into_iter().find(|f| !on_faces.contains(&(*f as usize)));
+        edges.push((info.points, across));
     }
-}
-
-/// The loops (in `plane` coordinates) that bound the triangles `on` of the mesh.
-fn boundary_loops(mesh: &solidcraft_geom::Mesh, plane: &Plane, on: &[[u32; 3]]) -> Vec<Ring<Vec2>> {
-    chain_loops(mesh, plane, on, |_, _| None).into_iter().map(|l| l.into_iter().map(|(p, _)| p).collect()).collect()
-}
-
-/// The loops (in `plane` coordinates) that bound the triangles `on` of the mesh, each point with
-/// `across(it, next)`: the face the outline runs along from it to the next point.
-fn chain_loops(
-    mesh: &solidcraft_geom::Mesh,
-    plane: &Plane,
-    on: &[[u32; 3]],
-    across: impl Fn(Vec3, Vec3) -> Option<u32>,
-) -> Vec<Vec<(Vec2, Option<u32>)>> {
-    // Boundary edges by position (meshes may repeat vertices per triangle).
-    let pos = |k: u32| mesh.positions.get(k as usize).copied().unwrap_or_default();
-    let q = |p: Vec3| ((p.x * 1e6).round() as i64, (p.y * 1e6).round() as i64, (p.z * 1e6).round() as i64);
-    let key = |a: Vec3, b: Vec3| {
-        let (ka, kb) = (q(a), q(b));
-        (ka.min(kb), ka.max(kb))
-    };
-    let mut count: std::collections::HashMap<((i64, i64, i64), (i64, i64, i64)), i32> = Default::default();
-    let edges: Vec<(Vec3, Vec3)> = on.iter().flat_map(|t| [(pos(t[0]), pos(t[1])), (pos(t[1]), pos(t[2])), (pos(t[2]), pos(t[0]))]).collect();
-    for (a, b) in &edges {
-        *count.entry(key(*a, *b)).or_insert(0) += 1;
-    }
-    let mut boundary: Vec<(Vec3, Vec3)> = edges.into_iter().filter(|(a, b)| count.get(&key(*a, *b)) == Some(&1)).collect();
-    // Chain into loops (plane coordinates).
+    let join_tol = (tol * 0.1).max(1e-4);
     let mut loops: Vec<Vec<(Vec2, Option<u32>)>> = Vec::new();
-    for _ in 0..10_000 {
-        let Some((s0, mut cur)) = boundary.pop() else { break };
-        let mut lp = vec![(s0, across(s0, cur))];
-        for _ in 0..boundary.len() + 1 {
-            if q(cur) == q(s0) {
+    while let Some((line, across)) = edges.pop() {
+        let (Some(&start), Some(&last)) = (line.first(), line.last()) else { continue };
+        let mut lp: Vec<(Vec3, Option<u32>)> = line.iter().take(line.len().saturating_sub(1)).map(|p| (*p, across)).collect();
+        let mut end = last;
+        while end.dist(start) > join_tol {
+            let meets = |p: Option<&Vec3>| p.is_some_and(|p| p.dist(end) <= join_tol);
+            let Some(k) = edges.iter().position(|(l, _)| meets(l.first()) || meets(l.last())) else {
                 break;
-            }
-            match boundary.iter().position(|(a, _)| q(*a) == q(cur)) {
-                Some(k) => {
-                    let b = boundary.remove(k).1;
-                    lp.push((cur, across(cur, b)));
-                    cur = b;
-                }
-                None => {
-                    lp.push((cur, None));
-                    break;
-                }
-            }
+            };
+            let (l, g) = edges.swap_remove(k);
+            let run: Vec<Vec3> = if meets(l.first()) { l } else { l.into_iter().rev().collect() };
+            end = run.last().copied().unwrap_or(start);
+            let take_n = run.len().saturating_sub(1);
+            lp.extend(run.into_iter().take(take_n).map(|p| (p, g)));
         }
         let raw: Vec<(Vec2, Option<u32>)> = lp.iter().map(|(p, f)| (plane.to_local(*p), *f)).collect();
         // Drop points in the middle of straight runs.
@@ -2244,78 +2205,53 @@ struct Recesses {
     volume: f64,
 }
 
-/// A planar face of the mesh parallel to the plate: its lowest and highest level, whether its
-/// outward normal is the picked face's (it faces up), its area, a point on it, and its
-/// triangles' centres and areas.
+/// A planar face of the body parallel to the plate.
 struct LevelFace {
-    lo: f64,
-    hi: f64,
+    d: f64,
     up: bool,
     area: f64,
     at: Vec3,
-    tris: Vec<(Vec3, f64)>,
+    internal: Vec3,
 }
 
 impl FaceSlice<'_> {
-    /// The recesses of a plate lying between levels `lo` and `hi` along `n` (measured from `at`),
-    /// whose sheet is built in `plane`. A recess's floor is a face parallel to the plate inside its
-    /// thickness, lying in an opening of the face it is cut into, and its walls are square to the
-    /// plate (walls that are not show as material the plate's volume doesn't account for). A body
-    /// that is no plate once its recesses are filled has none, so the plate check refuses it as
-    /// before: a bent part, whose legs' faces lie inside its extent. Recesses are taken in one face
-    /// only, up to half the thickness deep, and no larger than the face they are cut into (a plate
-    /// raised in places is no plate of the raised thickness).
     fn recesses(&self, body: &Body, (lo, hi): (f64, f64)) -> Result<Recesses> {
-        let (mesh, plane, at, n, tol) = (self.mesh, &self.plane, self.at, self.n, self.tol);
+        let (plane, at, n, tol) = (&self.plane, self.at, self.n, self.tol);
         let t = hi - lo;
         let eps = t * 1e-3;
-        let level = |p: Vec3| (p - at).dot(n);
-        let mut faces: BTreeMap<u32, Option<LevelFace>> = BTreeMap::new();
-        for (tri, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
-            let Some([a, b, c]) = mesh.tri(tri) else { continue };
-            let cr = (b - a).cross(c - a);
-            let len = cr.len();
-            if !(len > 1e-12) {
+        let infos = body.faces(0.0)?;
+        let mut faces: Vec<(usize, LevelFace)> = Vec::new();
+        for f in 0..body.face_count() {
+            let Some(kernel::FaceSurface::Plane { normal, point }) = kernel::face_surface(body, f) else { continue };
+            if normal.dot(n).abs() < 1.0 - 1e-6 {
                 continue;
             }
-            let up = cr.dot(n) > 0.0;
-            let entry = faces.entry(*f).or_insert(Some(LevelFace { lo: f64::MAX, hi: f64::MIN, up, area: 0.0, at: a, tris: Vec::new() }));
-            match entry {
-                Some(face) if face.up == up && cr.dot(n).abs() >= len * (1.0 - 1e-6) => {
-                    for p in [a, b, c] {
-                        face.lo = face.lo.min(level(p));
-                        face.hi = face.hi.max(level(p));
-                    }
-                    face.area += len / 2.0;
-                    face.tris.push(((a + b + c) / 3.0, len / 2.0));
-                }
-                _ => *entry = None,
-            }
+            let up = normal.dot(n) > 0.0;
+            let internal = body.face_internal_point(f).unwrap_or(point);
+            let d = (internal - at).dot(n);
+            let area = infos.get(f).map_or(0.0, |i| i.area);
+            let pt_at = body.face_edge_polylines(f).into_iter().flatten().next().unwrap_or(internal);
+            faces.push((f, LevelFace { d, up, area, at: pt_at, internal }));
         }
         // The floors (face index, level, the face), and the areas of the plate's two faces (at `lo`
         // and at `hi`).
         let mut floors: Vec<(usize, f64, &LevelFace)> = Vec::new();
         let (mut bottom, mut top) = (0.0, 0.0);
-        for (f, face) in faces.iter().filter_map(|(f, face)| Some((*f as usize, face.as_ref()?))) {
-            let d = (face.lo + face.hi) / 2.0;
-            if face.hi - face.lo > eps {
-                continue;
-            } else if (d - hi).abs() <= eps && face.up {
+        for (f, face) in &faces {
+            let d = face.d;
+            if (d - hi).abs() <= eps && face.up {
                 top += face.area;
             } else if (d - lo).abs() <= eps && !face.up {
                 bottom += face.area;
             } else if d > lo + eps && d < hi - eps {
-                floors.push((f, d, face));
+                floors.push((*f, d, face));
             }
         }
         let none = || Recesses { level: lo, pockets: Vec::new(), volume: 0.0 };
         if floors.is_empty() {
             return Ok(none());
         }
-        // A floor is a recess's where (most of) it lies in an opening of the face it is cut into:
-        // inside that face's outline and in a hole of it, not on an island in the hole. (Its
-        // triangles are those at its level within `eps`: `tol` may exceed a recess's depth.)
-        let probe = FaceSlice { mesh, plane: self.plane, at, n, tol: eps };
+        let probe = FaceSlice { body, plane: self.plane, at, n, tol: eps };
         let loops_at = |level: f64| -> Vec<Loop2> { probe.loops(level).into_iter().map(|l| Loop2::polygon(&l)).collect() };
         let (top_loops, bottom_loops) = (loops_at(hi), loops_at(lo));
         floors.retain(|(_, _, face)| {
@@ -2324,12 +2260,9 @@ impl FaceSlice<'_> {
                 let k = loops.iter().filter(|l| l.contains(p)).count();
                 k >= 2 && k.is_multiple_of(2)
             };
-            face.tris.iter().filter(|(c, _)| open(plane.to_local(*c))).map(|(_, a)| a).sum::<f64>() > face.area / 2.0
+            open(plane.to_local(face.internal))
         });
         let Some(&(_, _, first)) = floors.first() else { return Ok(none()) };
-        // Filled, the recesses leave a plate: its outline as large at `lo` as at `hi` once their
-        // openings count, and its volume with theirs the outline times the thickness. Else (a bent
-        // part) they are none.
         let depth_in = |d: f64, up: bool| if up { hi - d } else { d - lo };
         let opened = |up: bool| floors.iter().filter(|f| f.2.up == up).map(|f| f.2.area).sum::<f64>();
         let outline = bottom + opened(false);
@@ -2362,14 +2295,14 @@ impl FaceSlice<'_> {
                 "not supported yet: converting a plate whose recesses are larger than the face they are in (a plate thinner than {t:.3} mm, raised in places)"
             )));
         }
-        // The floors' outlines, from a mesh fine enough to mark them by.
-        let fine = body.mesh(&solidcraft_kernel::MeshTolerance::chord((t * 1e-2).min(tol).max(1e-4)))?;
+        let fine_chord = (t * 1e-2).min(tol).max(1e-4);
         floors.sort_by(|a, b| depth_of(a.1).total_cmp(&depth_of(b.1)));
         // Floors at one depth are one pocket where they meet.
         let mut groups: Vec<(f64, Vec<Region2>)> = Vec::new();
         for (f, d, ..) in &floors {
-            let on: Vec<[u32; 3]> = fine.triangles.iter().zip(&fine.tri_face).filter(|(_, g)| **g as usize == *f).map(|(tri, _)| *tri).collect();
-            let mut loops = boundary_loops(&fine, plane, &on);
+            let on_set = std::collections::HashSet::from([*f]);
+            let mut loops: Vec<Ring<Vec2>> =
+                chain_brep_edges(body, plane, &on_set, fine_chord, tol).into_iter().map(|l| l.into_iter().map(|(p, _)| p).collect()).collect();
             loops.sort_by(|a, b| b.signed_area().abs().total_cmp(&a.signed_area().abs()));
             let mut it = loops.into_iter();
             let Some(outline) = it.next() else { continue };
@@ -2559,8 +2492,7 @@ pub(super) fn plastic_eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &F
             }
             let plane = Plane::from_normal(face.0, n).ok_or_else(|| DocError::Invalid("rim plane".into()))?;
             let tol = (mb.body.size() * 1e-3).max(1e-3);
-            let mesh = mb.body.mesh(&solidcraft_kernel::MeshTolerance::chord(tol))?;
-            let slice = FaceSlice { mesh: &mesh, plane, at: face.0, n, tol };
+            let slice = FaceSlice { body: &mb.body, plane, at: face.0, n, tol };
             let mut loops = slice.loops(0.0);
             loops.sort_by(|a, b| b.signed_area().abs().total_cmp(&a.signed_area().abs()));
             let ccw = |l: &Ring<Vec2>| if l.signed_area() < 0.0 { l.iter().rev().copied().collect::<Ring<_>>() } else { l.clone() };
@@ -2571,7 +2503,7 @@ pub(super) fn plastic_eval(doc: &Document, vals: &BTreeMap<String, Value>, f: &F
                 l.edges().filter_map(|(a, b)| Some(((*a + *b) * 0.5, (*b - *a).normalized()?))).take(3).any(|(m, t)| {
                     // Just over the face, inside the loop (to the left of a ccw loop's edges).
                     let q = plane.to_world(m + Vec2::new(-t.y, t.x) * eps) + n * eps;
-                    !mesh.contains(q)
+                    !mb.body.contains(q)
                 })
             };
             let outer = loops.first().map(ccw);
