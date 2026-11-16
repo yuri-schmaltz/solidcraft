@@ -192,14 +192,14 @@ fn faces_under(b: &Body, at: &[Vec3]) -> Result<Vec<usize>> {
     Ok(out)
 }
 
-/// One point inside each face `faces` of `b`: its exact centroid.
+/// One point inside each face `faces` of `b`.
 fn face_points(b: &Body, faces: &[usize]) -> Result<Vec<Vec3>> {
     let (ops, order) = b.ops_body().ok_or_else(|| KernelError::Failed("offset faces: no ops body".into()))?;
     faces
         .iter()
         .map(|f| {
-            let c = ops.face_centroid(order, *f, 1e-4).map_err(|e| KernelError::Failed(e.to_string()))?;
-            Ok(Vec3::new(c.centroid[0], c.centroid[1], c.centroid[2]))
+            let p = ops.face_internal_point(order, *f).map_err(|e| KernelError::Failed(e.to_string()))?;
+            Ok(Vec3::new(p[0], p[1], p[2]))
         })
         .collect()
 }

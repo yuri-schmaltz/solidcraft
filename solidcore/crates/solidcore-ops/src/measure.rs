@@ -658,6 +658,17 @@ impl Body {
         })
     }
 
+    /// An interior point on record face `face` (`query::api_queries::face_internal_point`).
+    ///
+    /// # Errors
+    /// [`Error::Argument`] for an index past the faces; any kernel error.
+    pub fn face_internal_point(&self, order: &Order, face: usize) -> Result<[f64; 3]> {
+        let f = order::face(order, face)?;
+        with_body("face_internal_point", self, |k, b| {
+            q::face_internal_point(k, b, f).map(array)
+        })
+    }
+
     /// The closest points of `curve` (over its edge's interval) and record faces `faces` (as
     /// they are trimmed, their edges and vertices included) and record edges `edges` (over their
     /// intervals): the kernel's minimum-distance solve on the exact curves and surfaces
