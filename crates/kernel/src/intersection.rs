@@ -8,7 +8,7 @@
 use solidcore_record::Vec3;
 use solidcore_record::brep::Curve;
 
-use crate::body::{Body, MeshTolerance};
+use crate::body::Body;
 use crate::{KernelError, Result};
 
 /// One edge where two bodies meet.
@@ -50,7 +50,6 @@ pub fn meeting_edges(a: &Body, a_face: Option<&[usize]>, b: &Body, b_face: Optio
     let history = cut.history().map_err(|e| failed("history", e))?;
     let (body, order) = crate::native::body_from_smlib_ordered(&cut)?;
     let order = order.ok_or_else(|| failed("history", "the imprint's edges cannot be numbered"))?;
-    let mesh = body.mesh(&MeshTolerance::chord(chord))?;
     let record = body.record();
     let mut out = Vec::new();
     for (i, edge) in history.edges.iter().enumerate() {
@@ -58,10 +57,11 @@ pub fn meeting_edges(a: &Body, a_face: Option<&[usize]>, b: &Body, b_face: Optio
             continue;
         }
         let at = if order.edges.is_empty() { Some(i) } else { order.edges.get(i).copied() };
-        let (Some(e), Some(points)) = (at.and_then(|k| record.edges.get(k)), at.and_then(|k| mesh.edges.get(k))) else {
+        let Some(e) = at.and_then(|k| record.edges.get(k)) else {
             return Err(failed("history", format!("edge {i} is not in the imprinted body")));
         };
-        out.push(MeetingEdge { curve: e.parameters().clone(), interval: e.interval, points: points.clone() });
+        let points = crate::body::edge_points(e, chord)?;
+        out.push(MeetingEdge { curve: e.parameters().clone(), interval: e.interval, points });
     }
     Ok(out)
 }

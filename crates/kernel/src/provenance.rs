@@ -12,36 +12,43 @@ use solidcraft_geom::prelude::*;
 use std::collections::BTreeSet;
 
 use solidcore_record::{Plane, Region2, Seg2, Vec2, Vec3};
-use solidcraft_geom::{Aabb3, Mesh};
 
 use crate::Result;
 use crate::body::Body;
 use crate::history::{Change, EdgeOrigin, EdgeProv, FaceOrigin, FaceProv, History};
 
-/// Up to this many sample points per result face.
-const SAMPLES: usize = 24;
-
-/// A face's triangles with their unit normals, and its box.
-pub(crate) struct FaceTris {
-    pub(crate) tris: Vec<([Vec3; 3], Vec3)>,
-    pub(crate) bounds: Aabb3,
-    pub(crate) area: f64,
-}
-
-pub(crate) fn face_tris(m: &Mesh) -> Vec<FaceTris> {
-    let n = m.tri_face.iter().copied().max().map(|x| x as usize + 1).unwrap_or(0);
-    let mut out: Vec<FaceTris> = (0..n).map(|_| FaceTris { tris: Vec::new(), bounds: Aabb3::EMPTY, area: 0.0 }).collect();
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-        let (Some(slot), Some(p)) = (out.get_mut(*f as usize), m.tri(t)) else { continue };
-        let c = (p[1] - p[0]).cross(p[2] - p[0]);
-        let Some(nrm) = c.normalized() else { continue };
-        slot.area += c.len() * 0.5;
-        slot.bounds.extend(p);
-        slot.tris.push((p, nrm));
+fn surface_compatible(
+    rn: Option<Vec3>,
+    rsurf: &Option<crate::FaceSurface>,
+    in_n: Option<Vec3>,
+    isurf: &Option<crate::FaceSurface>,
+    tol: f64,
+) -> bool {
+    match (rn, in_n) {
+        (Some(a), Some(b)) => a.dot(b).abs() > 0.95,
+        (Some(_), None) | (None, Some(_)) => false,
+        (None, None) => match (rsurf, isurf) {
+            (
+                Some(crate::FaceSurface::Cylinder { origin: o1, axis: a1, radius: r1 }),
+                Some(crate::FaceSurface::Cylinder { origin: o2, axis: a2, radius: r2 }),
+            ) => {
+                (r1 - r2).abs() <= tol && a1.dot(*a2).abs() > 0.999 && {
+                    let d = *o2 - *o1;
+                    (d - *a1 * d.dot(*a1)).len() <= tol
+                }
+            }
+            (Some(crate::FaceSurface::Sphere { center: c1, radius: r1 }), Some(crate::FaceSurface::Sphere { center: c2, radius: r2 })) => {
+                (r1 - r2).abs() <= tol && c1.dist(*c2) <= tol
+            }
+            (Some(crate::FaceSurface::Cone { .. }), Some(crate::FaceSurface::Cone { .. }))
+            | (Some(crate::FaceSurface::Torus { .. }), Some(crate::FaceSurface::Torus { .. }))
+            | (None, None) => true,
+            _ => false,
+        },
     }
-    out
 }
 
+#[cfg(test)]
 pub(crate) fn closest_on_tri(p: Vec3, [a, b, c]: [Vec3; 3]) -> Vec3 {
     let (ab, ac, ap) = (b - a, c - a, p - a);
     let (d1, d2) = (ab.dot(ap), ac.dot(ap));
@@ -74,49 +81,32 @@ pub(crate) fn closest_on_tri(p: Vec3, [a, b, c]: [Vec3; 3]) -> Vec3 {
     a + ab * (vb * den) + ac * (vc * den)
 }
 
-/// Does point `p` with normal `n` lie on the face (within `tol`, normals along each other)?
-fn on_face(f: &FaceTris, p: Vec3, n: Vec3, tol: f64) -> bool {
-    if !f.bounds.inflated(tol).contains(p) {
-        return false;
-    }
-    // Either side: a cut's tool faces come out turned inside out.
-    f.tris.iter().any(|(t, tn)| tn.dot(n).abs() > 0.95 && closest_on_tri(p, *t).dist(p) <= tol)
-}
-
-/// Sample points (triangle centroids, spread out) with normals of a result face.
-fn face_samples(f: &FaceTris) -> Vec<(Vec3, Vec3)> {
-    let all: Vec<(Vec3, Vec3)> = f.tris.iter().map(|(t, n)| ((t[0] + t[1] + t[2]) * (1.0 / 3.0), *n)).collect();
-    if all.len() <= SAMPLES {
-        return all;
-    }
-    let step = all.len() as f64 / SAMPLES as f64;
-    (0..SAMPLES).filter_map(|i| all.get((i as f64 * step) as usize).copied()).collect()
-}
-
-/// Provenance of `result` from the bodies it was made of (in operand order), by geometry.
+/// Provenance of `result` from the bodies it was made of (in operand order), by exact B-rep geometry.
 pub fn trace(result: &Body, inputs: &[&Body]) -> Result<History> {
     let size = inputs.iter().map(|b| b.size()).fold(result.size(), f64::max).max(1e-9);
-    let mesh_tol = size * 2e-4;
-    let tol = mesh_tol * 2.0;
-    let rm = result.mesh(&crate::MeshTolerance::chord(mesh_tol))?;
-    let rfaces = face_tris(&rm);
-    let mut imeshes = Vec::with_capacity(inputs.len());
-    for b in inputs {
-        imeshes.push(b.mesh(&crate::MeshTolerance::chord(mesh_tol))?);
-    }
-    let ifaces: Vec<Vec<FaceTris>> = imeshes.iter().map(face_tris).collect();
-    // Each result face: the input faces most of its samples lie on.
+    let tol = size * 4e-4;
+    let rfaces = result.faces(0.0)?;
+    let rsurfs: Vec<_> = (0..rfaces.len()).map(|f| crate::face_surface(result, f)).collect();
+    let ifaces: Vec<Vec<_>> = inputs.iter().map(|b| b.faces(0.0)).collect::<Result<Vec<_>>>()?;
+    let isurfs: Vec<Vec<_>> = inputs.iter().map(|b| (0..b.face_count()).map(|f| crate::face_surface(b, f)).collect()).collect();
+    // Each result face: the input faces its internal point and boundary midpoints lie on with compatible surface.
     let mut origins: Vec<Vec<FaceOrigin>> = Vec::with_capacity(rfaces.len());
-    for rf in &rfaces {
-        let samples = face_samples(rf);
+    for (ri, rf) in rfaces.iter().enumerate() {
+        let mut samples: Vec<Vec3> = result.face_internal_point(ri).into_iter().collect();
+        for poly in result.face_edge_polylines(ri) {
+            if let Some(&mid) = poly.get(poly.len() / 2) {
+                samples.push(mid);
+            }
+        }
         let mut found: BTreeSet<FaceOrigin> = BTreeSet::new();
-        for (op, faces) in ifaces.iter().enumerate() {
-            for (fi, f) in faces.iter().enumerate() {
-                let hits = samples.iter().filter(|(p, n)| on_face(f, *p, *n, tol)).count();
-                // A face on the input face's surface and region: most of its samples land on it
-                // (a merged face's samples split between its origins).
-                if hits * 4 >= samples.len().max(1) || (hits > 0 && samples.len() <= 2) {
-                    found.insert(FaceOrigin::Face { operand: op, face: fi });
+        for p in &samples {
+            for (op, b) in inputs.iter().enumerate() {
+                for (fi, _, _) in b.faces_within(*p, tol) {
+                    let in_n = ifaces.get(op).and_then(|v| v.get(fi)).and_then(|f| f.plane_normal);
+                    let isurf = isurfs.get(op).and_then(|v| v.get(fi)).cloned().flatten();
+                    if surface_compatible(rf.plane_normal, &rsurfs[ri], in_n, &isurf, tol) {
+                        found.insert(FaceOrigin::Face { operand: op, face: fi });
+                    }
                 }
             }
         }
@@ -144,18 +134,21 @@ pub fn trace(result: &Body, inputs: &[&Body]) -> Result<History> {
         faces.push(FaceProv { origins: os, change });
     }
     // Edges: the faces they separate, and the input edge they lie on.
-    let mut edges = Vec::with_capacity(rm.edges.len());
-    for (ei, pts) in rm.edges.iter().enumerate() {
-        let fs: Vec<usize> = rm.edge_faces.get(ei).map(|v| v.iter().map(|x| *x as usize).collect()).unwrap_or_default();
+    let input_edges: Vec<Vec<Vec<Vec3>>> =
+        inputs.iter().map(|b| (0..b.edge_count()).map(|ie| b.edge_points(ie).unwrap_or_default()).collect()).collect();
+    let edge_faces_pts = result.edge_faces_and_points();
+    let mut edges = Vec::with_capacity(edge_faces_pts.len());
+    for (fs_u32, pts) in edge_faces_pts {
+        let fs: Vec<usize> = fs_u32.into_iter().map(|x| x as usize).collect();
         let probe: Vec<Vec3> = if pts.len() >= 2 {
             let k = pts.len();
             vec![pts[k / 2], (pts[0] + pts[1]) * 0.5, (pts[k - 2] + pts[k - 1]) * 0.5]
         } else {
-            pts.clone()
+            pts
         };
         let mut origin = None;
-        'search: for (op, m) in imeshes.iter().enumerate() {
-            for (ie, ipts) in m.edges.iter().enumerate() {
+        'search: for (op, iedges) in input_edges.iter().enumerate() {
+            for (ie, ipts) in iedges.iter().enumerate() {
                 if probe.iter().all(|p| ipts.windows(2).any(|w| p.dist_to_segment(w[0], w[1]) <= tol)) {
                     origin = Some((op, ie));
                     break 'search;

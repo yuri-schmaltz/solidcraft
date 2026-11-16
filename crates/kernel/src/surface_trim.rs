@@ -166,10 +166,11 @@ fn cut_by(x: &Body, tool: &SplitTool, keep: TrimKeep, extend: bool, name: &str) 
     let side = ToolSide::of(tool, x)?;
     let size = x.size();
     let touch = size * 1e-6 + 1e-9;
-    let m = x.mesh(&crate::MeshTolerance::chord(size * 2e-3))?;
     let (mut lo, mut hi, mut near) = (f64::INFINITY, f64::NEG_INFINITY, f64::INFINITY);
-    for p in &m.positions {
-        let v = side.at(*p);
+    let edge_pts = (0..x.edge_count()).filter_map(|e| x.edge_points(e)).flatten();
+    let face_pts = (0..x.face_count()).filter_map(|f| x.face_internal_point(f));
+    for p in edge_pts.chain(face_pts) {
+        let v = side.at(p);
         if !v.is_finite() {
             return Err(KernelError::Failed("the other surface cannot be evaluated over this one".into()));
         }
