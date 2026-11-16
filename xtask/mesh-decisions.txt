@@ -91,4 +91,3 @@ crates/engine/src/cmd/sketch_inspect.rs:face_at picks the face at a point by the
 crates/engine/src/cmd/sketch_inspect.rs:face_min_radius measures a face's least radius from mesh normals
 crates/engine/src/cmd/sketch_inspect.rs:minimum_radius measures a face's least radius by the display mesh
 crates/engine/src/frames.rs:frame_at picks the body a point lies on by the display mesh
-crates/kernel/src/helix.rs:sweep_helix_mesh models a thread as a triangle mesh for faceted booleans

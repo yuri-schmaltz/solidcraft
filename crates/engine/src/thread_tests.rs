@@ -174,7 +174,11 @@ fn faceted_flange_thread_preserves_thin_crest_boundaries() {
     let (start, end) = (cylinder.start - pitch, cylinder.end + pitch);
     let base = cylinder.axis_point + cylinder.axis * start;
     let plane = Plane { origin: base, x: cylinder.axis.cross(Vec3::new(1.0, 0.0, 0.0)).normalized().unwrap(), y: *cylinder.axis };
-    let groove = kernel::sweep_helix_mesh(&plane, &section, base, *cylinder.axis, pitch, (end - start) / pitch, 48).unwrap();
+    let region = solidcore_record::Region2 { outer: solidcore_record::Loop2::polygon(&section), holes: vec![] };
+    let groove = kernel::sweep_helix(&plane, &region, base, *cylinder.axis, pitch, (end - start) / pitch)
+        .unwrap()
+        .mesh(&solidcraft_kernel::MeshTolerance::chord(0.005))
+        .unwrap();
     let cut = kernel::faceted_boolean(body, &groove, kernel::BoolOp::Cut, pitch * 0.005).unwrap().unwrap();
     assert!(cut.validity().is_empty(), "{:?}", cut.validity());
     let before = body.mesh(&solidcraft_kernel::MeshTolerance::chord(0.001)).unwrap().measure().volume;
