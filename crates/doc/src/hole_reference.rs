@@ -4,7 +4,6 @@
 //! their stored points, so the hole follows them when the part changes.
 
 use solidcore_record::Vec3;
-use solidcraft_geom::Mesh;
 use solidcraft_geom::prelude::*;
 
 use crate::{DocError, ModelBody, ModelState, Result};
@@ -105,13 +104,13 @@ pub fn reference_frame(st: &ModelState, at: Vec3, dir: Vec3, edges: &[(Vec3, Opt
     }
     let points: Vec<Vec3> = edges.iter().map(|(p, _)| *p).collect();
     let b = body_for(st, at, &points).ok_or_else(|| DocError::Invalid("no body at the hole for its reference edges".into()))?;
-    let m = b.mesh();
+    let edge_data = b.body.edge_faces_and_points();
     let size = b.body.size().max(1e-9);
     let mut found = Vec::with_capacity(edges.len());
     for (k, (p, name)) in edges.iter().enumerate() {
-        found.push(find_edge(b, &m, k, *p, *name, exact)?);
+        found.push(find_edge(b, &edge_data, k, *p, *name, exact)?);
     }
-    let (face, origin, normal) = flat_face(b, &m, at, dir, &found).ok_or_else(|| {
+    let (face, origin, normal) = flat_face(b, &edge_data, at, dir, &found).ok_or_else(|| {
         DocError::Invalid("reference edges need the hole on a flat face: no flat face facing the drill at the hole or along its edges".into())
     })?;
     let mut lines = Vec::with_capacity(found.len());
@@ -123,7 +122,7 @@ pub fn reference_frame(st: &ModelState, at: Vec3, dir: Vec3, edges: &[(Vec3, Opt
         let mid = (a + z) * 0.5;
         // The side the face is on next to the edge; an edge the face doesn't border (or borders
         // on both sides) takes the side the hole is on.
-        let side = face_side(&m, face, mid, across, normal, size).unwrap_or_else(|| if (at - mid).dot(across) < 0.0 { -1.0 } else { 1.0 });
+        let side = face_side(&b.body, face, mid, across, normal, size).unwrap_or_else(|| if (at - mid).dot(across) < 0.0 { -1.0 } else { 1.0 });
         lines.push(ReferenceLine { point: mid, along, toward: across * side });
     }
     if let [a, b] = lines.as_slice()
@@ -137,13 +136,8 @@ pub fn reference_frame(st: &ModelState, at: Vec3, dir: Vec3, edges: &[(Vec3, Opt
 /// Whether `p` lies on the flat face a reference frame was made for.
 pub fn on_reference_face(st: &ModelState, frame: &ReferenceFrame, p: Vec3) -> bool {
     let Some(b) = st.bodies.iter().find(|b| b.name == frame.body) else { return false };
-    let m = b.mesh();
     let tol = (b.body.size() * 1e-4).max(1e-6);
-    m.triangles
-        .iter()
-        .zip(&m.tri_face)
-        .filter(|(_, f)| **f as usize == frame.face)
-        .any(|(t, _)| m.tri(t).is_some_and(|[a, bb, c]| crate::appearance::closest_on_triangle(p, a, bb, c).dist(p) <= tol))
+    b.body.face_distances(p).get(frame.face).is_some_and(|d| *d <= tol)
 }
 
 /// The persistent names of the edges at `edges`, on the body the hole at `at` is drilled into
@@ -187,7 +181,7 @@ fn to_polyline(p: Vec3, e: &[Vec3]) -> f64 {
 /// no edge fails, asking for the edge to be picked again), else by the edge nearest `p`: one
 /// that runs through `p` for a fresh pick, within a quarter of the body for a stored one. It
 /// must be straight.
-fn find_edge(b: &ModelBody, m: &Mesh, k: usize, p: Vec3, name: Option<&str>, exact: bool) -> Result<(Vec3, Vec3, usize)> {
+fn find_edge(b: &ModelBody, edge_data: &[(Vec<u32>, Vec<Vec3>)], k: usize, p: Vec3, name: Option<&str>, exact: bool) -> Result<(Vec3, Vec3, usize)> {
     let size = b.body.size().max(1e-9);
     let by_name = match name.filter(|n| !n.is_empty()) {
         Some(n) => Some(crate::naming::locate_edge(b, n, p).map_err(|_| DocError::reselect(n))?.edge),
@@ -197,10 +191,10 @@ fn find_edge(b: &ModelBody, m: &Mesh, k: usize, p: Vec3, name: Option<&str>, exa
         Some(i) => i,
         None => {
             let reach = if exact { (size * 1e-2).max(1e-3) } else { size * 0.25 };
-            m.edges
+            edge_data
                 .iter()
                 .enumerate()
-                .map(|(i, e)| (to_polyline(p, e), i))
+                .map(|(i, (_, e))| (to_polyline(p, e), i))
                 .filter(|(d, _)| d.is_finite())
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .filter(|(d, _)| *d <= reach)
@@ -214,7 +208,7 @@ fn find_edge(b: &ModelBody, m: &Mesh, k: usize, p: Vec3, name: Option<&str>, exa
                 })?
         }
     };
-    let e = m.edges.get(i).ok_or_else(|| DocError::Invalid(format!("reference edge {} no longer exists", k + 1)))?;
+    let e = edge_data.get(i).map(|(_, pts)| pts).ok_or_else(|| DocError::Invalid(format!("reference edge {} no longer exists", k + 1)))?;
     let (Some(a), Some(z)) = (e.first().copied(), e.last().copied()) else {
         return Err(DocError::Invalid(format!("reference edge {} no longer exists", k + 1)));
     };
@@ -228,7 +222,7 @@ fn find_edge(b: &ModelBody, m: &Mesh, k: usize, p: Vec3, name: Option<&str>, exa
 
 /// The flat face a referenced hole goes into (its index, a point on it and its outward normal):
 /// the one under `at` when it faces the drill, else the one the edges border that faces it most.
-fn flat_face(b: &ModelBody, m: &Mesh, at: Vec3, dir: Vec3, edges: &[(Vec3, Vec3, usize)]) -> Option<(usize, Vec3, Vec3)> {
+fn flat_face(b: &ModelBody, edge_data: &[(Vec<u32>, Vec<Vec3>)], at: Vec3, dir: Vec3, edges: &[(Vec3, Vec3, usize)]) -> Option<(usize, Vec3, Vec3)> {
     let size = b.body.size().max(1e-9);
     let plane = |f: usize| match crate::kernel::face_surface(&b.body, f) {
         // Outward, so against the drill.
@@ -247,9 +241,9 @@ fn flat_face(b: &ModelBody, m: &Mesh, at: Vec3, dir: Vec3, edges: &[(Vec3, Vec3,
     }
     // The faces every edge borders.
     let mut faces: Vec<usize> =
-        edges.first().and_then(|(_, _, i)| m.edge_faces.get(*i)).map(|fs| fs.iter().map(|f| *f as usize).collect()).unwrap_or_default();
+        edges.first().and_then(|(_, _, i)| edge_data.get(*i)).map(|(fs, _)| fs.iter().map(|f| *f as usize).collect()).unwrap_or_default();
     for (_, _, i) in edges.iter().skip(1) {
-        let theirs = m.edge_faces.get(*i).map(Vec::as_slice).unwrap_or(&[]);
+        let theirs = edge_data.get(*i).map(|(fs, _)| fs.as_slice()).unwrap_or(&[]);
         faces.retain(|f| theirs.iter().any(|g| *g as usize == *f));
     }
     faces.into_iter().filter_map(plane).min_by(|x, y| x.2.dot(dir).total_cmp(&y.2.dot(dir)))
@@ -257,11 +251,11 @@ fn flat_face(b: &ModelBody, m: &Mesh, at: Vec3, dir: Vec3, edges: &[(Vec3, Vec3,
 
 /// Which side of an edge (through `mid`, square to it in the plane along `across`) face `face`
 /// lies on: +1 or −1, or `None` when both sides or neither are that face.
-fn face_side(m: &Mesh, face: usize, mid: Vec3, across: Vec3, normal: Vec3, size: f64) -> Option<f64> {
+fn face_side(body: &crate::kernel::Body, face: usize, mid: Vec3, across: Vec3, normal: Vec3, size: f64) -> Option<f64> {
     let step = (size * 1e-3).max(1e-6);
     let lands = |s: f64| {
         let from = mid + across * (s * step) + normal * step;
-        m.raycast(from, -normal).is_some_and(|(t, tri)| t <= 2.0 * step && m.tri_face.get(tri).is_some_and(|f| *f as usize == face))
+        body.raycast_face(from, -normal).is_some_and(|(t, hit_face)| t <= 2.0 * step && hit_face == face)
     };
     match (lands(1.0), lands(-1.0)) {
         (true, false) => Some(1.0),
