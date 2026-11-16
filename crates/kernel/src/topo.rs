@@ -432,12 +432,15 @@ pub fn cylinder_face_at(b: &Body, p: Vec3) -> Option<CylinderFace> {
     let size = b.size();
     let tol = (size * 1e-3).max(1e-3);
     let near = b.faces_within(p, size * 0.05);
-    let nearest = near.first()?.1;
+    let nearest = near.iter().map(|(_, d, _)| *d).fold(f64::INFINITY, f64::min);
+    if !nearest.is_finite() {
+        return None;
+    }
     let faces = Faces::new(b.record(), (size * 1e-4).max(1e-6) * 10.0);
     // Of the faces within `tol` of the nearest, the point lies on the one whose own surface it
     // is nearest (a cylinder: within its extent).
     let mut best: Option<(f64, Option<CylinderFace>)> = None;
-    for (face, d, _) in near.into_iter().take_while(|(_, d, _)| *d <= nearest + tol) {
+    for (face, d, _) in near.into_iter().filter(|(_, d, _)| *d <= nearest + tol) {
         let (off, cyl) = match (faces.surf(face), cylinder_of(&faces, face)) {
             (_, Some((axis, o, r, internal))) => {
                 let c = cylinder_extent(b, face, axis, o, r, internal)?;

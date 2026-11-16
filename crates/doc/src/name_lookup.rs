@@ -21,11 +21,10 @@
 //! (`F4:bore:side:1`): see [`locate_thread_face_on_body`] (#16602).
 
 use solidcore_record::Vec3;
-use solidcraft_geom::Mesh;
 use solidcraft_geom::prelude::*;
 
 use crate::history_names::{Match, Names};
-use crate::naming::{self, closest, edge_names, face_names, strip_piece};
+use crate::naming::{self, edge_names, face_names, strip_piece};
 use crate::piece_names::strip_edge_number;
 use crate::{FeatureKind, ModelBody, ModelState, Operation};
 
@@ -70,17 +69,17 @@ pub fn locate_edge(b: &ModelBody, name: &str, near: Vec3) -> Result<EdgeHit, Str
     if legacy_name(name).is_some() {
         return Err(format!("edge `{name}` was named by a build before format 14"));
     }
-    let m = b.mesh();
+    let edge_data = b.body.edge_faces_and_points();
     let names = edge_names(b);
     let faces = naming::names(b);
-    let mid = |i: usize| edge_mid(&m, i);
+    let mid = |i: usize| edge_mid(&edge_data, i);
     // Several edges between the same two faces are numbered by where they lie: not exact.
     let verified = |i: usize| {
-        m.edge_faces.get(i).is_some_and(|fs| fs.iter().all(|f| faces.verified(*f as usize)))
+        edge_data.get(i).is_some_and(|(fs, _)| fs.iter().all(|f| faces.verified(*f as usize)))
             && names.get(i).is_some_and(|n| strip_edge_number(n).len() == n.len())
     };
     let exact = |i: usize| -> Result<EdgeHit, String> {
-        let on = edge_near(b, &m, i, near);
+        let on = edge_near(b, &edge_data, i, near);
         mid(i).map(|p| EdgeHit { edge: i, point: if on { near } else { p }, verified: verified(i), on_point: on }).ok_or_else(|| "edge".into())
     };
     if let Some(i) = names.iter().position(|n| crate::persistent_name::same_edge(n, name)) {
@@ -89,7 +88,7 @@ pub fn locate_edge(b: &ModelBody, name: &str, near: Vec3) -> Result<EdgeHit, Str
     // By the faces it separates: the best way any edge matches.
     let wanted = strip_edge_number(name);
     let (mut best, mut loose): (Option<(Match, Vec<usize>)>, bool) = (None, false);
-    for (i, fs) in m.edge_faces.iter().enumerate() {
+    for (i, (fs, _)) in edge_data.iter().enumerate() {
         let [fa, fb] = fs.as_slice() else { continue };
         let Some(level) = edge_match(&faces, *fa as usize, *fb as usize, wanted) else { continue };
         if exactly(level) {
@@ -100,18 +99,18 @@ pub fn locate_edge(b: &ModelBody, name: &str, near: Vec3) -> Result<EdgeHit, Str
     }
     let at_pick = |i: usize| EdgeHit { edge: i, point: near, verified: false, on_point: true };
     let Some((_, cands)) = best else {
-        let picked = if loose { resuffixed_edge(b, &m, &faces, wanted, near) } else { renamed_edge(b, &m, &faces, wanted, near) };
+        let picked = if loose { resuffixed_edge(b, &edge_data, &faces, wanted, near) } else { renamed_edge(b, &edge_data, &faces, wanted, near) };
         return picked.map(at_pick).ok_or_else(|| format!("edge `{name}` no longer exists"));
     };
     // When the faces of several numbered edges bound one edge now, every one of their names
     // finds the faces of that edge: taking it for each would put them all on one edge (#13332).
     let numbered = wanted.len() != name.len();
     match cands.as_slice() {
-        [i] if numbered && !edge_near(b, &m, *i, near) => {
+        [i] if numbered && !edge_near(b, &edge_data, *i, near) => {
             Err(format!("edge `{name}` was one of several between its faces, and the one left is elsewhere"))
         }
         [i] => exact(*i),
-        _ => resuffixed_edge(b, &m, &faces, wanted, near).map(at_pick).ok_or_else(|| format!("edge `{name}` is no longer one edge")),
+        _ => resuffixed_edge(b, &edge_data, &faces, wanted, near).map(at_pick).ok_or_else(|| format!("edge `{name}` is no longer one edge")),
     }
 }
 
@@ -529,16 +528,11 @@ fn pick_reach(b: &ModelBody) -> f64 {
 
 /// Whether the picked point `near` lies on edge `i` of body `b` (whose mesh is `m`): then a
 /// reference keeps it.
-fn edge_near(b: &ModelBody, m: &Mesh, i: usize, near: Vec3) -> bool {
-    m.edges.get(i).is_some_and(|e| e.windows(2).any(|w| near.dist_to_segment(w[0], w[1]) < pick_reach(b)))
+fn edge_near(b: &ModelBody, edge_data: &[(Vec<u32>, Vec<Vec3>)], i: usize, near: Vec3) -> bool {
+    edge_data.get(i).is_some_and(|(_, e)| e.windows(2).any(|w| near.dist_to_segment(w[0], w[1]) < pick_reach(b)))
 }
 
-/// The edge of body `b` whose exact curve passes through the picked point `near`, by its index
-/// in the body's mesh `m` (the mesh's edges are the B-rep's, in its order: the edge's faces are
-/// checked too). A point at an end of the edge is on the edges that meet there as well, so it
-/// names none. `None` too for a mesh body, a point that is not finite, or a point a pick's reach
-/// from every edge but a periodic face's seam or a pole.
-fn edge_through(b: &ModelBody, m: &Mesh, near: Vec3) -> Option<usize> {
+fn edge_through(b: &ModelBody, edge_data: &[(Vec<u32>, Vec<Vec3>)], near: Vec3) -> Option<usize> {
     let reach = pick_reach(b);
     let (d, i) = solidcraft_kernel::comb_edge_near(&b.body, near).ok().flatten()?;
     let record = b.body.record();
@@ -548,7 +542,7 @@ fn edge_through(b: &ModelBody, m: &Mesh, near: Vec3) -> Option<usize> {
         fs.dedup();
         fs
     };
-    let same_faces = sorted(edge.uses.iter().map(|u| u.face).collect()) == sorted(m.edge_faces.get(i)?.clone());
+    let same_faces = sorted(edge.uses.iter().map(|u| u.face).collect()) == sorted(edge_data.get(i)?.0.clone());
     let clear_of_ends = edge
         .vertices
         .iter()
@@ -567,7 +561,7 @@ fn edge_through(b: &ModelBody, m: &Mesh, near: Vec3) -> Option<usize> {
 /// swapped for another), and the reference asks again. A face whose feature made nothing on the
 /// body was removed with it, and so is the name. The point must be the
 /// reference's own pick: a caller that passes a point on another edge cannot take what this finds.
-fn renamed_edge(b: &ModelBody, m: &Mesh, faces: &Names, wanted: &str, near: Vec3) -> Option<usize> {
+fn renamed_edge(b: &ModelBody, edge_data: &[(Vec<u32>, Vec<Vec3>)], faces: &Names, wanted: &str, near: Vec3) -> Option<usize> {
     let count = faces.faces.len();
     let found = |x: &str| {
         let mut hits = (0..count).filter(|f| crate::history_names::matches(faces, *f, x).is_some_and(exactly));
@@ -590,7 +584,7 @@ fn renamed_edge(b: &ModelBody, m: &Mesh, faces: &Names, wanted: &str, near: Vec3
         }
     }
     let &[(face, lost_by)] = kept.as_slice() else { return None };
-    let edge = edge_through(b, m, near)?;
+    let edge = edge_through(b, edge_data, near)?;
     let uses = &b.body.record().edges.get(edge)?.uses;
     // The edge's other face is not one of the lost face's feature: where that feature made the
     // face at the pick, its face was replaced there (a sketch line swapped for another), not renamed.
@@ -612,7 +606,7 @@ fn renamed_edge(b: &ModelBody, m: &Mesh, faces: &Names, wanted: &str, near: Vec3
 /// whose exact curve the reference's point `near` lies on (within the pick reach, as
 /// [`solidcraft_kernel::edge_distance`] measures it) is taken; none or several, and the name finds
 /// nothing. The point must be the reference's own pick, as for [`renamed_edge`].
-fn resuffixed_edge(b: &ModelBody, m: &Mesh, faces: &Names, wanted: &str, near: Vec3) -> Option<usize> {
+fn resuffixed_edge(b: &ModelBody, edge_data: &[(Vec<u32>, Vec<Vec3>)], faces: &Names, wanted: &str, near: Vec3) -> Option<usize> {
     if b.body.is_mesh() || !near.is_finite() {
         return None;
     }
@@ -628,7 +622,7 @@ fn resuffixed_edge(b: &ModelBody, m: &Mesh, faces: &Names, wanted: &str, near: V
         (level == Match::Stem && qualified(x) && faces.faces.get(f).is_some_and(|n| qualified(n))).then_some(true)
     };
     let mut cands: Vec<usize> = Vec::new();
-    for (i, fs) in m.edge_faces.iter().enumerate() {
+    for (i, (fs, _)) in edge_data.iter().enumerate() {
         let [fa, fb] = fs.as_slice() else { continue };
         let answers = wanted.match_indices('|').any(|(k, _)| {
             let (Some(x), Some(y)) = (wanted.get(..k), wanted.get(k + 1..)) else { return false };
@@ -646,12 +640,12 @@ fn resuffixed_edge(b: &ModelBody, m: &Mesh, faces: &Names, wanted: &str, near: V
         fs
     };
     let mut on = cands.into_iter().filter(|i| {
-        // The mesh's edges are the B-rep's, in its order: the edge's faces say it is the same edge.
+        // The edge's faces say it is the same edge.
         let same = record
             .edges
             .get(*i)
-            .zip(m.edge_faces.get(*i))
-            .is_some_and(|(e, fs)| sorted(e.uses.iter().map(|u| u.face).collect()) == sorted(fs.clone()));
+            .zip(edge_data.get(*i))
+            .is_some_and(|(e, (fs, _))| sorted(e.uses.iter().map(|u| u.face).collect()) == sorted(fs.clone()));
         same && solidcraft_kernel::edge_distance(&b.body, *i, near).ok().flatten().is_some_and(|d| d <= reach)
     });
     on.next().filter(|_| on.next().is_none())
@@ -662,27 +656,45 @@ fn qualified(x: &str) -> bool {
     crate::piece_names::piece_parts(x).is_some_and(|(_, around)| !around.is_empty())
 }
 
-/// The point of face `face` of a mesh nearest `p`, and how far it is.
-fn nearest_on_face(m: &Mesh, face: usize, p: Vec3) -> Option<(f64, Vec3)> {
-    let mut best: Option<(f64, Vec3)> = None;
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-        if *f as usize != face {
-            continue;
-        }
-        let Some([a, b, c]) = m.tri(t) else { continue };
-        let q = closest(p, a, b, c);
-        let d = q.dist(p);
-        // A non-finite candidate must never become the best: nothing compares less than NaN.
-        if d.is_finite() && best.is_none_or(|x| d < x.0) {
-            best = Some((d, q));
-        }
+/// The point on segment `a..=b` nearest `p`.
+fn closest_on_segment(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
+    let ab = b - a;
+    let len2 = ab.dot(ab);
+    if len2 <= 0.0 {
+        return a;
     }
-    best
+    let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+    a + ab * t
 }
 
-/// The middle of edge `i` of a mesh (along its polyline).
-fn edge_mid(m: &Mesh, i: usize) -> Option<Vec3> {
-    let e = m.edges.get(i)?;
+/// The point of face `face` of `b` nearest `p`, and how far it is.
+fn nearest_on_face(b: &ModelBody, face: usize, p: Vec3) -> Option<(f64, Vec3)> {
+    let d = b.body.face_distances(p).get(face).copied()?;
+    if !d.is_finite() {
+        return None;
+    }
+    let tol = (b.body.size() * 1e-4).max(1e-6);
+    if d <= tol {
+        return Some((d, p));
+    }
+    if let Some(q) = solidcraft_kernel::face_surface(&b.body, face).and_then(|s| s.nearest(p))
+        && b.body.face_distances(q).get(face).is_some_and(|qd| *qd <= tol)
+    {
+        return Some((d, q));
+    }
+    let q = b
+        .body
+        .face_edge_polylines(face)
+        .into_iter()
+        .flat_map(|e| e.windows(2).map(|w| closest_on_segment(p, w[0], w[1])).collect::<Vec<_>>())
+        .chain(b.body.face_internal_point(face))
+        .min_by(|a, b| a.dist(p).total_cmp(&b.dist(p)))?;
+    Some((d, q))
+}
+
+/// The middle of edge `i` (along its polyline).
+fn edge_mid(edge_data: &[(Vec<u32>, Vec<Vec3>)], i: usize) -> Option<Vec3> {
+    let e = &edge_data.get(i)?.1;
     let total: f64 = e.windows(2).map(|w| w[0].dist(w[1])).sum();
     let mut acc = 0.0;
     for w in e.windows(2) {
@@ -767,95 +779,48 @@ impl FaceHit {
     pub fn along(&self, st: &ModelState, p: Vec3, dir: Vec3) -> Option<Vec3> {
         let b = st.bodies.get(self.body)?;
         let d = dir.normalized()?;
-        let m = b.mesh();
-        let slack = (b.body.size() * 1e-9).max(1e-9);
-        let mut best: Option<f64> = None;
-        for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-            if *f as usize != self.face {
-                continue;
-            }
-            let Some([a, bb, c]) = m.tri(t) else { continue };
-            // A hair's width around each triangle, so a place on the seam of two is on the face.
-            let centre = (a + bb + c) * (1.0 / 3.0);
-            let grow = |v: Vec3| v + (v - centre).normalized().unwrap_or(Vec3::ZERO) * slack;
-            if let Some(hit) = naming::ray_hit(p, d, grow(a), grow(bb), grow(c))
-                && best.is_none_or(|old| hit.abs() < old.abs())
-            {
-                best = Some(hit);
-            }
+        let hit_fwd = b.body.raycast_face(p, d).filter(|(_, f)| *f == self.face).map(|(t, _)| t);
+        let hit_bwd = b.body.raycast_face(p, -d).filter(|(_, f)| *f == self.face).map(|(t, _)| -t);
+        let ray_best = match (hit_fwd, hit_bwd) {
+            (Some(a), Some(b)) => Some(if a.abs() <= b.abs() { a } else { b }),
+            (a, b) => a.or(b),
+        };
+        if let Some(t) = ray_best {
+            return Some(p + d * t);
         }
-        best.map(|t| p + d * t)
+        let Some(solidcraft_kernel::FaceSurface::Plane { normal, point }) = solidcraft_kernel::face_surface(&b.body, self.face) else {
+            return None;
+        };
+        let denom = d.dot(normal);
+        if denom.abs() <= 1e-9 {
+            return None;
+        }
+        let q = p + d * ((point - p).dot(normal) / denom);
+        let tol = (b.body.size() * 1e-4).max(1e-6);
+        b.body.face_distances(q).get(self.face).is_some_and(|dist| *dist <= tol).then_some(q)
     }
 
     /// A point that picks the face found again by itself: [`point`](Self::point) when the
-    /// reference's point still lies on the face clear of its edges; else the point of the face
-    /// nearest `p` that keeps clear of every edge of it. The nearest point of a face the
-    /// reference's point no longer lies on is on the face's boundary (a parameter moved the face
-    /// away from the pick), where a pick by point finds the face beside it as well (#2531).
-    pub fn pick_point(&self, st: &ModelState, p: Vec3) -> Vec3 {
+    /// reference's point still lies on the face clear of its edges; else an exact internal
+    /// point on the face clear of its edges.
+    pub fn pick_point(&self, st: &ModelState, _p: Vec3) -> Vec3 {
         let Some(b) = st.bodies.get(self.body) else { return self.point };
-        let m = b.mesh();
-        // Clear of the edges by a few pick tolerances, or by half the face's roomiest triangle
-        // on a face narrower than that.
-        let Some(margin) = roomiest_inradius(&m, self.face).map(|r| (4.0 * (b.body.size() * 1e-3).max(1e-3)).min(r * 0.5)) else {
-            return self.point;
-        };
-        if self.on_point && edge_clearance(&m, self.face, self.point) >= margin {
+        let internal = b.body.face_internal_point(self.face);
+        let margin = (4.0 * (b.body.size() * 1e-3).max(1e-3)).min(internal.map_or(f64::INFINITY, |pt| edge_clearance(&b.body, self.face, pt) * 0.5));
+        if self.on_point && edge_clearance(&b.body, self.face, self.point) >= margin {
             return self.point;
         }
-        inside_nearest(&m, self.face, p, margin).unwrap_or(self.point)
+        internal.unwrap_or(self.point)
     }
 }
 
-/// The incentre and inradius of triangle abc (`None`: degenerate).
-fn incircle(a: Vec3, b: Vec3, c: Vec3) -> Option<(Vec3, f64)> {
-    // The incentre weighs each corner by the side opposite it; the inradius is area / half the perimeter.
-    let (la, lb, lc) = (b.dist(c), c.dist(a), a.dist(b));
-    let perimeter = la + lb + lc;
-    let radius = (b - a).cross(c - a).len() / perimeter;
-    let centre = (a * la + b * lb + c * lc) / perimeter;
-    (radius.is_finite() && radius > 0.0 && centre.is_finite()).then_some((centre, radius))
-}
-
-/// The triangles of face `face` of a mesh.
-fn face_triangles(m: &Mesh, face: usize) -> impl Iterator<Item = [Vec3; 3]> + '_ {
-    m.triangles.iter().zip(&m.tri_face).filter(move |(_, f)| **f as usize == face).filter_map(|(t, _)| m.tri(t))
-}
-
-/// The greatest inradius of the triangles of face `face` of a mesh (`None`: it has none).
-fn roomiest_inradius(m: &Mesh, face: usize) -> Option<f64> {
-    face_triangles(m, face).filter_map(|[a, b, c]| incircle(a, b, c)).map(|(_, r)| r).reduce(f64::max)
-}
-
-/// How far `q` is from the nearest edge bounding face `face` of a mesh (infinite: it has none).
-fn edge_clearance(m: &Mesh, face: usize, q: Vec3) -> f64 {
-    m.edges
-        .iter()
-        .zip(&m.edge_faces)
-        .filter(|(_, fs)| fs.iter().any(|f| *f as usize == face))
-        .flat_map(|(e, _)| e.windows(2).map(|w| q.dist_to_segment(w[0], w[1])))
+/// How far `q` is from the nearest edge bounding face `face` of `body` (infinite: it has none).
+fn edge_clearance(body: &solidcraft_kernel::Body, face: usize, q: Vec3) -> f64 {
+    body.face_edge_polylines(face)
+        .into_iter()
+        .flat_map(|e| e.windows(2).map(|w| q.dist_to_segment(w[0], w[1])).collect::<Vec<_>>())
         .filter(|d| d.is_finite())
         .fold(f64::INFINITY, f64::min)
-}
-
-/// The point of face `face` of a mesh nearest `p` among the points at least `margin` inside one
-/// of its triangles (each triangle shrunk about its incentre by `margin`): such a point is at
-/// least `margin` from every edge of the face, which runs along the sides of its triangles.
-/// `None`: no triangle of the face is roomier than `margin`.
-fn inside_nearest(m: &Mesh, face: usize, p: Vec3, margin: f64) -> Option<Vec3> {
-    let mut best: Option<(f64, Vec3)> = None;
-    for [a, b, c] in face_triangles(m, face) {
-        let Some((centre, radius)) = incircle(a, b, c).filter(|(_, r)| *r > margin) else { continue };
-        // Shrunk about the incentre so each side moves in by `margin`.
-        let s = (radius - margin) / radius;
-        let shrink = |v: Vec3| centre + (v - centre) * s;
-        let q = closest(p, shrink(a), shrink(b), shrink(c));
-        let d = q.dist(p);
-        if d.is_finite() && best.is_none_or(|(old, _)| d < old) {
-            best = Some((d, q));
-        }
-    }
-    best.map(|(_, q)| q)
 }
 
 /// A stored name as a message quotes it: whole up to about 80 characters, else its start and
@@ -1033,7 +998,7 @@ fn sheet_locate(st: &ModelState, name: &str, p: Vec3) -> Result<FaceHit, Miss> {
         [] => return Err(Miss::Gone),
         _ => return Err(Miss::Several),
     };
-    let (distance, point) = nearest_on_face(&b.mesh(), face, p).ok_or(Miss::Gone)?;
+    let (distance, point) = nearest_on_face(b, face, p).ok_or(Miss::Gone)?;
     Ok(FaceHit { body: bi, face, point, verified: true, on_point: distance <= (b.body.size() * 1e-3).max(1e-3) })
 }
 
@@ -1053,7 +1018,7 @@ fn locate_in<'a>(bodies: impl Iterator<Item = (usize, &'a ModelBody)>, name: &st
     }
     let (level, faces) = best.ok_or(Miss::Gone)?;
     let found = |(body, b, face): (usize, &ModelBody, usize)| {
-        let (distance, point) = nearest_on_face(&b.mesh(), face, p)?;
+        let (distance, point) = nearest_on_face(b, face, p)?;
         Some(FaceHit { body, face, point, verified: naming::names(b).verified(face), on_point: distance <= (b.body.size() * 1e-3).max(1e-3) })
     };
     if let [one] = faces.as_slice() {

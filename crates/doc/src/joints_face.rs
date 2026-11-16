@@ -287,10 +287,11 @@ pub fn face_name_at(doc: &Document, st: &ModelState, component: u64, pick: Vec3,
         let p = apply_point(&mat_inverse(&offset)?, pick);
         let tol = (b.body.size() * 1e-3).max(1e-3).max(b.display_tol());
         let near = b.body.faces_within(p, tol * 5.0);
-        let Some(&(_, nearest, _)) = near.first() else {
+        let nearest = near.iter().map(|(_, d, _)| *d).fold(f64::INFINITY, f64::min);
+        if !nearest.is_finite() {
             continue;
-        };
-        for (f, d, _) in near.into_iter().take_while(|(_, d, _)| *d <= nearest + tol) {
+        }
+        for (f, d, _) in near.into_iter().filter(|(_, d, _)| *d <= nearest + tol) {
             let (off, cylinder) = match solidcraft_kernel::face_surface(&b.body, f) {
                 Some(solidcraft_kernel::FaceSurface::Plane { normal, point }) => (d.min((p - point).dot(normal).abs()), false),
                 Some(solidcraft_kernel::FaceSurface::Cylinder { .. }) => {

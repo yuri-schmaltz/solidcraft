@@ -24,13 +24,6 @@ crates/doc/src/joints_edge.rs:edge_frame places an edge snap by the display mesh
 crates/doc/src/joints_edge.rs:edge_snap places an edge snap by the display mesh
 crates/doc/src/joints_edge.rs:nearest_edge picks the edge nearest a point by the display mesh
 crates/doc/src/lineage.rs:order_legacy_family orders a face family by the display mesh
-crates/doc/src/name_lookup.rs:FaceHit::along meets a line with a found face on the display mesh
-crates/doc/src/name_lookup.rs:FaceHit::pick_point finds a point that picks a face again on the display mesh
-crates/doc/src/name_lookup.rs:face_triangles reads a face's mesh triangles for name lookup
-crates/doc/src/name_lookup.rs:locate_edge finds a named edge on the display mesh
-crates/doc/src/name_lookup.rs:locate_in finds a named face among bodies by the display mesh
-crates/doc/src/name_lookup.rs:nearest_on_face finds the nearest point of a face on its mesh triangles
-crates/doc/src/name_lookup.rs:sheet_locate finds a sheet face by its name on the display mesh
 crates/doc/src/naming.rs:FaceIndex::new indexes faces by mesh triangles for naming
 crates/doc/src/naming.rs:blend_seams finds blend seams on the display mesh
 crates/doc/src/naming.rs:carried_face_names carries face names to imported bodies by the display mesh
