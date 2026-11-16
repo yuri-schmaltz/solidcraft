@@ -69,7 +69,7 @@ impl NamedFace<'_> {
 
     /// The face as a cylinder, in the body's own coordinates (`None`: not a cylinder).
     fn own_cylinder(&self) -> Option<CylinderFace> {
-        solidcraft_kernel::cylinder_face(&self.body.body, &self.body.mesh(), self.face)
+        solidcraft_kernel::cylinder_face(&self.body.body, self.face)
     }
 
     /// The face as a cylinder, in the component's coordinates.
@@ -144,19 +144,12 @@ pub(super) fn placed(m: &Mat, c: CylinderFace) -> CylinderFace {
 /// The face across the rim at the `at` end (along the axis) of cylinder `c`, face `face` of `b`
 /// (the body's own coordinates): of the body's other faces, the one nearest the rim's points.
 fn rim_neighbour(b: &ModelBody, face: usize, c: &CylinderFace, at: f64) -> Option<usize> {
-    let mesh = b.mesh();
     let slack = (c.end - c.start).abs() * 1e-3 + 1e-9;
     let mut rim: Vec<Vec3> = Vec::new();
-    for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
-        if *f as usize != face {
-            continue;
-        }
-        for k in t {
-            if let Some(q) = mesh.positions.get(*k as usize)
-                && ((*q - c.axis_point).dot(c.axis) - at).abs() <= slack
-                && !rim.iter().any(|r| r.dist(*q) <= slack)
-            {
-                rim.push(*q);
+    for pts in b.body.face_edge_polylines(face) {
+        for q in pts {
+            if ((q - c.axis_point).dot(c.axis) - at).abs() <= slack && !rim.iter().any(|r| r.dist(q) <= slack) {
+                rim.push(q);
             }
         }
     }
@@ -166,21 +159,17 @@ fn rim_neighbour(b: &ModelBody, face: usize, c: &CylinderFace, at: f64) -> Optio
     if rim.is_empty() {
         return None;
     }
-    let mut near: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
-    for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
-        let f = *f as usize;
-        if f == face {
-            continue;
-        }
-        let Some([p, q, r]) = mesh.tri(t) else { continue };
-        let slot = near.entry(f).or_insert_with(|| vec![f64::INFINITY; rim.len()]);
-        for (d, x) in slot.iter_mut().zip(&rim) {
-            *d = d.min(crate::naming::closest(*x, p, q, r).dist(*x));
+    let mut near: BTreeMap<usize, f64> = BTreeMap::new();
+    for x in &rim {
+        for (f, d) in b.body.face_distances(*x).into_iter().enumerate() {
+            if f != face {
+                *near.entry(f).or_insert(0.0) += d;
+            }
         }
     }
     // The face that meets the whole rim (the other half of a cylinder split in two meets only
     // the rim's points at its seams).
-    near.into_iter().map(|(f, d)| (d.iter().sum::<f64>(), f)).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, f)| f)
+    near.into_iter().map(|(f, d)| (d, f)).min_by(|a, b| a.0.total_cmp(&b.0)).map(|(_, f)| f)
 }
 
 /// The ends of a cylinder: (place along the axis, which way out of the face).
@@ -296,23 +285,16 @@ pub fn face_name_at(doc: &Document, st: &ModelState, component: u64, pick: Vec3,
         }
         let offset = doc.model_body_offset(b).copied().unwrap_or(IDENTITY);
         let p = apply_point(&mat_inverse(&offset)?, pick);
-        let mesh = b.mesh();
         let tol = (b.body.size() * 1e-3).max(1e-3).max(b.display_tol());
-        let mut near: BTreeMap<usize, f64> = BTreeMap::new();
-        for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
-            let Some([x, y, z]) = mesh.tri(t) else { continue };
-            let d = crate::naming::closest(p, x, y, z).dist(p);
-            near.entry(*f as usize).and_modify(|n| *n = n.min(d)).or_insert(d);
-        }
-        let nearest = near.values().copied().fold(f64::INFINITY, f64::min);
-        if nearest > tol * 5.0 {
+        let near = b.body.faces_within(p, tol * 5.0);
+        let Some(&(_, nearest, _)) = near.first() else {
             continue;
-        }
-        for (f, d) in near.into_iter().filter(|(_, d)| *d <= nearest + tol) {
+        };
+        for (f, d, _) in near.into_iter().take_while(|(_, d, _)| *d <= nearest + tol) {
             let (off, cylinder) = match solidcraft_kernel::face_surface(&b.body, f) {
                 Some(solidcraft_kernel::FaceSurface::Plane { normal, point }) => (d.min((p - point).dot(normal).abs()), false),
                 Some(solidcraft_kernel::FaceSurface::Cylinder { .. }) => {
-                    (solidcraft_kernel::cylinder_face(&b.body, &mesh, f).map_or(d, |c| d.min(c.off(p))), true)
+                    (solidcraft_kernel::cylinder_face(&b.body, f).map_or(d, |c| d.min(c.off(p))), true)
                 }
                 _ => (d, false),
             };
@@ -337,10 +319,9 @@ pub fn round_end_at(doc: &Document, st: &ModelState, component: u64, centre: Vec
         }
         let offset = doc.model_body_offset(b).copied().unwrap_or(IDENTITY);
         let p = apply_point(&mat_inverse(&offset)?, centre);
-        let mesh = b.mesh();
         let tol = (b.body.size() * 1e-3).max(1e-3);
         for f in 0..b.body.face_count() {
-            let Some(c) = solidcraft_kernel::cylinder_face(&b.body, &mesh, f) else { continue };
+            let Some(c) = solidcraft_kernel::cylinder_face(&b.body, f) else { continue };
             let v = p - c.axis_point;
             let along = v.dot(c.axis);
             for (at, _) in ends(&c) {

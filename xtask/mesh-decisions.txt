@@ -8,7 +8,6 @@ crates/doc/src/eval.rs:blend_edges_on finds a blend's edges on the display mesh
 crates/doc/src/eval.rs:edge_refs turns edge picks into references through the display mesh
 crates/doc/src/eval.rs:eval_feature_kind places features by the display mesh (faces, edges, nearness)
 crates/doc/src/eval.rs:feature_tools_with_constructor reaches a To Object extent by the display mesh
-crates/doc/src/eval.rs:parallel_tapped_wall finds a tapped hole's parallel wall on the display mesh
 crates/doc/src/eval.rs:resolve_edges finds edge references again on a mesh
 crates/doc/src/eval.rs:tangent_face_chain grows a face pick across tangent edges on the display mesh
 crates/doc/src/eval.rs:trim_to_body keeps the tool pieces touching the start by a mesh
@@ -26,10 +25,6 @@ crates/doc/src/joints_cam.rs:profile_points samples a cam profile's edges from a
 crates/doc/src/joints_edge.rs:edge_frame places an edge snap by the display mesh
 crates/doc/src/joints_edge.rs:edge_snap places an edge snap by the display mesh
 crates/doc/src/joints_edge.rs:nearest_edge picks the edge nearest a point by the display mesh
-crates/doc/src/joints_face.rs:NamedFace::own_cylinder reads a named face's cylinder from the display mesh
-crates/doc/src/joints_face.rs:face_name_at names the face at a pick by its mesh triangles
-crates/doc/src/joints_face.rs:rim_neighbour finds the face across a cylinder's rim by the display mesh
-crates/doc/src/joints_face.rs:round_end_at finds a cylinder's round end by the display mesh
 crates/doc/src/lineage.rs:order_legacy_family orders a face family by the display mesh
 crates/doc/src/name_lookup.rs:FaceHit::along meets a line with a found face on the display mesh
 crates/doc/src/name_lookup.rs:FaceHit::pick_point finds a point that picks a face again on the display mesh
@@ -41,11 +36,8 @@ crates/doc/src/name_lookup.rs:sheet_locate finds a sheet face by its name on the
 crates/doc/src/naming.rs:FaceIndex::new indexes faces by mesh triangles for naming
 crates/doc/src/naming.rs:blend_seams finds blend seams on the display mesh
 crates/doc/src/naming.rs:carried_face_names carries face names to imported bodies by the display mesh
-crates/doc/src/naming.rs:face_spot finds where a face is by the display mesh
-crates/doc/src/naming.rs:face_spots finds where faces are by the display mesh
 crates/doc/src/naming.rs:geometric_names names faces from sample points on the display mesh
 crates/doc/src/naming.rs:normals takes face normals from mesh triangles
-crates/doc/src/naming.rs:roomiest takes a sample point per face from mesh triangles
 crates/doc/src/naming.rs:samples_up_to takes sample points per face from mesh triangles
 crates/doc/src/project.rs:body_mesh finds a projection's body nearest a point by the display mesh
 crates/doc/src/project.rs:cache_key keys projections by the display mesh
@@ -112,6 +104,3 @@ crates/kernel/src/provenance.rs:face_tris reads face triangles for provenance
 crates/kernel/src/provenance.rs:trace traces a result's faces to its operands by meshes
 crates/kernel/src/shell_groups.rs:meshes_meet decides whether bodies meet by mesh triangles
 crates/kernel/src/surface_trim.rs:cut_by trims a surface by a tool through a mesh
-crates/kernel/src/topo.rs:cylinder_end_at finds a cylinder's end circle by a mesh
-crates/kernel/src/topo.rs:cylinder_extent measures a cylindrical face's extent and side from mesh normals
-crates/kernel/src/topo.rs:cylinder_face_at finds the cylindrical face at a point by a mesh

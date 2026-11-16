@@ -1304,52 +1304,16 @@ pub struct FaceSpot {
     pub surface: Option<solidcraft_kernel::FaceSurface>,
 }
 
-/// The incentre and inradius of the roomiest triangle (greatest inradius) of each face of a mesh,
-/// of face `only` alone if given.
-fn roomiest(m: &Mesh, only: Option<usize>) -> Vec<Option<(f64, Vec3)>> {
-    let mut best = vec![None; m.tri_face.iter().map(|f| *f as usize + 1).max().unwrap_or(0)];
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-        let f = *f as usize;
-        if only.is_some_and(|i| i != f) {
-            continue;
-        }
-        let Some([a, b, c]) = m.tri(t) else { continue };
-        // The incentre weighs each corner by the side opposite it; the inradius is area / half the perimeter.
-        let (la, lb, lc) = (b.dist(c), c.dist(a), a.dist(b));
-        let perimeter = la + lb + lc;
-        let radius = (b - a).cross(c - a).len() / perimeter;
-        let centre = (a * la + b * lb + c * lc) / perimeter;
-        if let Some(slot) = best.get_mut(f)
-            && radius.is_finite()
-            && centre.is_finite()
-            && slot.is_none_or(|(old, _)| radius > old)
-        {
-            *slot = Some((radius, centre));
-        }
-    }
-    best
-}
-
-/// The spot of face `index` of `b` from its roomiest triangle: the triangle's incentre, so a point
-/// that lies on the face however it is shaped (the centroid of a plate with a hole is in the hole,
-/// that of a half cylinder inside the cylinder) and well away from its edges, so a pick there finds
-/// this face. On a face of an analytic surface the point is moved onto the surface itself (a facet
-/// of a curved face lies inside it by its sag), as far as that stays well inside the triangle.
-fn spot(b: &ModelBody, index: usize, roomiest: Option<(f64, Vec3)>) -> Option<FaceSpot> {
-    let (radius, centre) = roomiest?;
-    let surface = solidcraft_kernel::face_surface(&b.body, index);
-    let point = surface.and_then(|s| s.nearest(centre)).filter(|q| q.dist(centre) <= radius * 0.5).unwrap_or(centre);
-    Some(FaceSpot { point, surface })
-}
-
-/// [`face_spot`] of every face of a body (`None`: the face has no triangles), in one pass.
+/// [`face_spot`] of every face of a body (`None`: the face has no surface).
 pub fn face_spots(b: &ModelBody) -> Vec<Option<FaceSpot>> {
-    roomiest(&b.mesh(), None).into_iter().enumerate().map(|(i, best)| spot(b, i, best)).collect()
+    (0..b.body.face_count()).map(|i| face_spot(b, i)).collect()
 }
 
-/// Where face `index` of `b` is (`None`: it has no triangles).
+/// Where face `index` of `b` is (`None`: it has no surface).
 pub fn face_spot(b: &ModelBody, index: usize) -> Option<FaceSpot> {
-    spot(b, index, roomiest(&b.mesh(), Some(index)).get(index).copied().flatten())
+    let point = b.body.face_internal_point(index)?;
+    let surface = solidcraft_kernel::face_surface(&b.body, index);
+    Some(FaceSpot { point, surface })
 }
 
 /// A point on the face with this name, the name `model.faces` lists for it, on the body called

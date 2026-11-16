@@ -863,6 +863,12 @@ impl Body {
         ops.face_plane_normal(order, face).ok().flatten().map(|n| Vec3::new(n.value[0], n.value[1], n.value[2]))
     }
 
+    /// An exact point strictly inside `face` of `self`, or `None` for a mesh body or invalid index.
+    pub fn face_internal_point(&self, face: usize) -> Option<Vec3> {
+        let (ops, order) = self.ops_body()?;
+        ops.face_internal_point(order, face).ok().map(|p| Vec3::new(p[0], p[1], p[2]))
+    }
+
     /// One exact point on each face of `self` (its centroid), or empty for a mesh body.
     pub fn face_samples(&self) -> Vec<Vec3> {
         let Some((ops, order)) = self.ops_body() else {
