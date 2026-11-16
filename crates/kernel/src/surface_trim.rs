@@ -210,6 +210,7 @@ fn nearest_boundary_edge(x: &Body, side: &ToolSide) -> Result<Vec3> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solidcraft_geom::PlaneGeom;
     use crate::history::{Change, FaceOrigin};
     use crate::{extrude_sheet, measure, patch_region, stitch};
     use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2};
