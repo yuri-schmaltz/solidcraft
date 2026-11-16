@@ -769,6 +769,176 @@ impl Body {
         }
     }
 
+    /// The first face of `self` met by the ray from `origin` along `dir`, as `(distance, face_index)`.
+    pub fn raycast_face(&self, origin: Vec3, dir: Vec3) -> Option<(f64, usize)> {
+        let (ops, order) = self.ops_body()?;
+        let hit = ops.face_hit_by_ray(order, [origin.x, origin.y, origin.z], [dir.x, dir.y, dir.z]).ok()??;
+        Some((hit.distance, hit.face))
+    }
+
+    /// Whether `p` lies inside or on the boundary of `self` (for a B-rep body).
+    pub fn contains(&self, p: Vec3) -> bool {
+        let Some((ops, _)) = self.ops_body() else {
+            return false;
+        };
+        let Ok(mut res) = ops.classify_points(&[[p.x, p.y, p.z]]) else {
+            return false;
+        };
+        matches!(res.pop().and_then(std::result::Result::ok), Some(solidcore_ops::PointClass::Inside | solidcore_ops::PointClass::OnBoundary))
+    }
+
+    /// The face of `self` nearest `p` within `tol`, or `None`.
+    pub fn face_at(&self, p: Vec3, tol: f64) -> Option<usize> {
+        if !p.is_finite() {
+            return None;
+        }
+        let (ops, order) = self.ops_body()?;
+        let dists = ops.face_distances_within(order, &[[p.x, p.y, p.z]], tol).ok()?;
+        dists
+            .into_iter()
+            .enumerate()
+            .filter_map(|(f, row)| {
+                let d = row.first().copied().flatten()?;
+                (d <= tol).then_some((d, f))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, f)| f)
+    }
+
+    /// Faces of `self` within `reach` of `p`, each with its exact distance and outward normal.
+    pub fn faces_within(&self, p: Vec3, reach: f64) -> Vec<(usize, f64, Vec3)> {
+        let Some((ops, order)) = self.ops_body() else {
+            return Vec::new();
+        };
+        let max_dist = if reach.is_finite() { reach.max(1e-6) } else { 1e12 };
+        let Ok(dists) = ops.face_distances_within(order, &[[p.x, p.y, p.z]], max_dist) else {
+            return Vec::new();
+        };
+        dists
+            .into_iter()
+            .enumerate()
+            .filter_map(|(f, row)| {
+                let d = row.first().copied().flatten()?;
+                if d <= reach {
+                    let n = ops.face_plane_normal(order, f).ok().flatten().map(|n| Vec3::new(n.value[0], n.value[1], n.value[2])).unwrap_or(Vec3::Z);
+                    Some((f, d, n))
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// The face in `faces` nearest `p` within `reach`, and its exact distance.
+    pub fn nearest_face_in(&self, p: Vec3, faces: &std::collections::BTreeSet<usize>, reach: f64) -> Option<(f64, usize)> {
+        let (ops, order) = self.ops_body()?;
+        let max_dist = if reach.is_finite() { reach.max(1e-6) } else { 1e12 };
+        let dists = ops.face_distances_within(order, &[[p.x, p.y, p.z]], max_dist).ok()?;
+        dists
+            .into_iter()
+            .enumerate()
+            .filter(|(f, _)| faces.contains(f))
+            .filter_map(|(f, row)| {
+                let d = row.first().copied().flatten()?;
+                (d <= reach).then_some((d, f))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// Exact distance from `p` to each face of `self`, or empty for a mesh body.
+    pub fn face_distances(&self, p: Vec3) -> Vec<f64> {
+        let Some((ops, order)) = self.ops_body() else {
+            return Vec::new();
+        };
+        let reach = self.size().max(1.0) * 100.0;
+        let Ok(dists) = ops.face_distances_within(order, &[[p.x, p.y, p.z]], reach) else {
+            return Vec::new();
+        };
+        dists.into_iter().map(|row| row.first().copied().flatten().unwrap_or(f64::INFINITY)).collect()
+    }
+
+    /// The outward normal of `face` if it is planar, or `None`.
+    pub fn face_plane_normal(&self, face: usize) -> Option<Vec3> {
+        let (ops, order) = self.ops_body()?;
+        ops.face_plane_normal(order, face).ok().flatten().map(|n| Vec3::new(n.value[0], n.value[1], n.value[2]))
+    }
+
+    /// One exact point on each face of `self` (its centroid), or empty for a mesh body.
+    pub fn face_samples(&self) -> Vec<Vec3> {
+        let Some((ops, order)) = self.ops_body() else {
+            return Vec::new();
+        };
+        (0..self.face_count())
+            .filter_map(|f| ops.face_centroid(order, f, 1e-4).ok().map(|c| Vec3::new(c.centroid[0], c.centroid[1], c.centroid[2])))
+            .collect()
+    }
+
+    /// Exact polyline samples along `edge` of `self`, or `None` for a mesh body or invalid index.
+    pub fn edge_points(&self, edge: usize) -> Option<Vec<Vec3>> {
+        if self.is_mesh() {
+            return None;
+        }
+        edge_points(self.record.edges.get(edge)?, (self.size() * 1e-3).max(1e-4)).ok()
+    }
+
+    /// The edge of `self` nearest `p`, or `None` for a mesh body or empty body.
+    pub fn edge_at(&self, p: Vec3) -> Option<usize> {
+        if self.is_mesh() || !p.is_finite() {
+            return None;
+        }
+        let chord = (self.size() * 1e-3).max(1e-4);
+        self.record
+            .edges
+            .iter()
+            .enumerate()
+            .filter_map(|(i, e)| {
+                let pts = edge_points(e, chord).ok()?;
+                let d = pts.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::MAX, f64::min);
+                Some((d, i))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, i)| i)
+    }
+
+    /// For each edge of `self`, its incident face indices and exact polyline points.
+    pub fn edge_faces_and_points(&self) -> Vec<(Vec<u32>, Vec<Vec3>)> {
+        if self.is_mesh() {
+            return Vec::new();
+        }
+        let chord = (self.size() * 1e-3).max(1e-4);
+        self.record
+            .edges
+            .iter()
+            .map(|e| {
+                let fs: Vec<u32> = e.uses.iter().map(|u| u.face).collect();
+                let pts = edge_points(e, chord).unwrap_or_default();
+                (fs, pts)
+            })
+            .collect()
+    }
+
+    /// Exact polyline samples for each non-seam edge bordering `face` of `self`.
+    pub fn face_edge_polylines(&self, face: usize) -> Vec<Vec<Vec3>> {
+        if self.is_mesh() {
+            return Vec::new();
+        }
+        let Some(f) = self.record.faces.get(face) else {
+            return Vec::new();
+        };
+        let chord = (self.size() * 1e-3).max(1e-4);
+        let mut out = Vec::new();
+        for l in &f.loops {
+            let brep::Loop::Edges { edges } = l else { continue };
+            for ue in edges {
+                let Some(e) = self.record.edges.get(ue.edge as usize) else { continue };
+                if let Ok(pts) = edge_points(e, chord) {
+                    out.push(pts);
+                }
+            }
+        }
+        out
+    }
+
     /// The face of `self` nearest `p` and its exact distance, or `None` for a mesh body or empty body.
     pub fn nearest_face(&self, p: Vec3) -> Option<(f64, usize)> {
         let (ops, order) = self.ops_body()?;
