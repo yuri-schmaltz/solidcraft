@@ -11,10 +11,7 @@ use solidcraft_geom::prelude::*;
 use super::SheetBody;
 use crate::{ModelBody, ModelState, apply_point, mat_inverse};
 
-/// The share of a face's sample points that must agree on a name for the face to take it.
-const AGREE: f64 = 0.8;
-
-/// The sine of the angle within which a flat face's plane faces along a triangle's normal.
+/// The sine of the angle within which a flat face's plane faces along a face's normal.
 const FACING: f64 = 1e-3;
 
 impl SheetBody {
@@ -118,37 +115,17 @@ impl SheetBody {
 /// the sheet does not name (a hole's wall, a pocket's floor) and for every face of a body that is
 /// no folded sheet of `st`.
 pub fn body_sheet_face_names(st: &ModelState, b: &ModelBody) -> Vec<Option<String>> {
-    let m = b.mesh();
-    let nf = m.tri_face.iter().map(|f| *f as usize + 1).max().unwrap_or(0);
+    let nf = b.body.face_count();
     let Some(sheet) = st.sheets.iter().find(|s| s.body == b.name && !s.flat) else { return vec![None; nf] };
-    // Triangle centres lie inside a face, off a curved one by its facets' sag: a fifth of the
-    // thickness takes them and still tells a flat face from the rim beside it.
     let tol = sheet.t * 0.2;
-    let mut votes: Vec<Vec<(String, usize)>> = vec![Vec::new(); nf];
-    let mut total = vec![0usize; nf];
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-        let (Some(v), Some(n), Some([a, b2, c])) = (votes.get_mut(*f as usize), total.get_mut(*f as usize), m.tri(t)) else { continue };
-        let Some(normal) = (b2 - a).cross(c - a).normalized() else { continue };
-        // At most a few dozen points a face: enough to tell its name, cheap on a fine mesh.
-        if *n >= 48 {
-            continue;
-        }
-        *n += 1;
-        if let Some(name) = sheet.face_name_facing((a + b2 + c) * (1.0 / 3.0), normal, tol) {
-            match v.iter_mut().find(|(x, _)| *x == name) {
-                Some(x) => x.1 += 1,
-                None => v.push((name, 1)),
-            }
-        }
-    }
-    votes
-        .into_iter()
-        .zip(total)
-        .map(|(v, n)| {
-            v.into_iter()
-                .max_by_key(|x| x.1)
-                .filter(|(_, k)| *k as f64 >= AGREE * n.max(1) as f64)
-                .map(|(name, _)| super::sheet_face_name(&b.name, &name))
+    (0..nf)
+        .map(|f| {
+            let p = b.body.face_internal_point(f)?;
+            let name = match b.body.face_plane_normal(f) {
+                Some(normal) => sheet.face_name_facing(p, normal, tol),
+                None => sheet.bend_face_at(p, tol),
+            }?;
+            Some(super::sheet_face_name(&b.name, &name))
         })
         .collect()
 }

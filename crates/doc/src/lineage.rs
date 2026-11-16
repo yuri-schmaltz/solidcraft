@@ -9,7 +9,6 @@
 //! bodies the feature built itself (whose faces are named by their role: the sketch curve they
 //! sweep, the cap they are). Naming (`history_names`) reads it; nothing here samples geometry.
 
-use solidcraft_geom::prelude::*;
 use std::sync::{Arc, OnceLock};
 
 use solidcore_record::{Region2, Vec3};
@@ -744,19 +743,10 @@ fn order_legacy_family(bodies: &mut [crate::ModelBody], members: &[usize], doc: 
     }
     let names: Vec<String> = members.iter().filter_map(|i| bodies.get(*i).map(|b| b.name.clone())).collect();
     let picks = later_picks(doc, f, &names);
-    // How far piece `i` is from the points of name `k` (the mesh's nearest triangle).
+    // How far piece `i` is from the points of name `k` (the body's nearest face).
     let far = |piece: usize, pts: &[Vec3]| -> f64 {
         let Some(b) = members.get(piece).and_then(|i| bodies.get(*i)) else { return f64::INFINITY };
-        let m = b.mesh();
-        pts.iter()
-            .map(|p| {
-                m.triangles
-                    .iter()
-                    .filter_map(|t| m.tri(t))
-                    .map(|[a, b, c]| solidcraft_geom::compare::closest_on_triangle(*p, a, b, c).dist(*p))
-                    .fold(f64::INFINITY, f64::min)
-            })
-            .fold(0.0, f64::max)
+        pts.iter().map(|p| b.body.face_distances(*p).into_iter().fold(f64::INFINITY, f64::min)).fold(0.0, f64::max)
     };
     let mut order: Vec<Option<usize>> = vec![None; names.len()];
     let mut taken = vec![false; members.len()];

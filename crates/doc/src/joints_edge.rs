@@ -29,11 +29,11 @@ fn tol(b: &ModelBody) -> f64 {
 
 /// The edge of `b` nearest `p`, and how far it is.
 fn nearest_edge(b: &ModelBody, p: Vec3) -> Option<(usize, f64)> {
-    b.mesh()
-        .edges
-        .iter()
+    b.body
+        .edge_faces_and_points()
+        .into_iter()
         .enumerate()
-        .map(|(i, e)| (i, e.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min)))
+        .map(|(i, (_, e))| (i, e.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min)))
         .filter(|(_, d)| d.is_finite())
         .min_by(|a, b| a.1.total_cmp(&b.1))
 }
@@ -124,13 +124,12 @@ pub(super) fn edge_frame(doc: &Document, st: &ModelState, comp: u64, snap: &Snap
         Some(n) => gone(&format!("the edge `{n}`")),
         None => DocError::Invalid("joint origin: no edge there".into()),
     })?;
-    let m = b.mesh();
-    let e = m.edges.get(i).ok_or_else(bad)?;
+    let e = b.body.edge_points(i).ok_or_else(bad)?;
     let (_, z, centroid) = face_of(b, i, face.as_deref(), pick)?;
     let flat = |v: Vec3| (v - z * v.dot(z)).normalized();
     let local = match corner {
         None => {
-            let (mid, along) = middle(e).ok_or_else(bad)?;
+            let (mid, along) = middle(&e).ok_or_else(bad)?;
             // Into the face: toward its centroid, square to the edge; a face whose centroid lies on
             // the edge's line (only a sliver) falls back to the side z × along gives.
             let to_c = centroid - mid;
@@ -144,10 +143,11 @@ pub(super) fn edge_frame(doc: &Document, st: &ModelState, comp: u64, snap: &Snap
                 .map(|hit| hit.edge)
                 .filter(|j| *j != i)
                 .ok_or_else(|| gone(&format!("the edge `{other}`")))?;
-            let f = m.edges.get(j).ok_or_else(bad)?;
+            let f = b.body.edge_points(j).ok_or_else(bad)?;
             let t = tol(b);
-            let at = meeting(e, f, t).ok_or_else(|| DocError::Invalid(format!("joint origin: its edges no longer meet at a corner (`{other}`)")))?;
-            let (de, df) = (leaving(e, at, t).and_then(flat).ok_or_else(bad)?, leaving(f, at, t).and_then(flat).ok_or_else(bad)?);
+            let at =
+                meeting(&e, &f, t).ok_or_else(|| DocError::Invalid(format!("joint origin: its edges no longer meet at a corner (`{other}`)")))?;
+            let (de, df) = (leaving(&e, at, t).and_then(flat).ok_or_else(bad)?, leaving(&f, at, t).and_then(flat).ok_or_else(bad)?);
             let x = if z.dot(de.cross(df)) >= 0.0 { de } else { df };
             frame(at, z, Some(x)).ok_or_else(bad)
         }
@@ -193,8 +193,8 @@ pub fn edge_snap(doc: &Document, st: &ModelState, comp: u64, pick: Vec3, on: Opt
     let (local, on, corner) = (apply_point(&inv, pick), on.map(|p| apply_point(&inv, p)), corner.map(|c| apply_point(&inv, c)));
     let names = crate::naming::edge_names(b);
     let face_names = crate::naming::face_names(b);
-    let m = b.mesh();
-    let beside: Vec<usize> = m.edge_faces.get(i).map(|fs| fs.iter().map(|f| *f as usize).collect()).unwrap_or_default();
+    let edge_data = b.body.edge_faces_and_points();
+    let beside: Vec<usize> = edge_data.get(i).map(|(fs, _)| fs.iter().map(|f| *f as usize).collect()).unwrap_or_default();
     let face_index = match on {
         Some(p) => {
             let f = crate::naming::face_name_at_body(b, p)
@@ -212,7 +212,7 @@ pub fn edge_snap(doc: &Document, st: &ModelState, comp: u64, pick: Vec3, on: Opt
     let corner = match corner {
         None => None,
         Some(c) => {
-            let e = m.edges.get(i).cloned().unwrap_or_default();
+            let e = edge_data.get(i).map(|(_, e)| e.clone()).unwrap_or_default();
             let t = tol(b);
             let end = [e.first().copied(), e.last().copied()]
                 .into_iter()
@@ -220,12 +220,11 @@ pub fn edge_snap(doc: &Document, st: &ModelState, comp: u64, pick: Vec3, on: Opt
                 .min_by(|a, b| a.dist(c).total_cmp(&b.dist(c)))
                 .ok_or_else(|| DocError::Invalid("joint origin: that edge has no ends".into()))?;
             // The other edge of the face that ends there.
-            let other = m
-                .edges
+            let other = edge_data
                 .iter()
                 .enumerate()
-                .filter(|(j, _)| *j != i && m.edge_faces.get(*j).is_some_and(|fs| fs.contains(&(face_index as u32))))
-                .find(|(_, f)| meeting(&[end], f, t).is_some())
+                .filter(|(j, (fs, _))| *j != i && fs.contains(&(face_index as u32)))
+                .find(|(_, (_, f))| meeting(&[end], f, t).is_some())
                 .map(|(j, _)| j)
                 .ok_or_else(|| DocError::Invalid("joint origin: no other edge of the face meets that end (a round edge has no corner)".into()))?;
             Some(

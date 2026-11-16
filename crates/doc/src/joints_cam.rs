@@ -324,15 +324,24 @@ fn profile_points(doc: &Document, st: &ModelState, p: &CamProfile, cam: &super::
             }
             // Each body sampled to its own size (a large part beside the cam leaves the cam fine).
             // Each body's edges with the faces beside them.
-            let meshes: Vec<solidcraft_geom::Mesh> = bodies
+            let body_edges: Vec<Vec<(Vec<Vec3>, Vec<u32>)>> = bodies
                 .iter()
-                .map(|b| b.body.mesh(&solidcraft_kernel::MeshTolerance::chord(tolerance(b.body.size()))))
-                .collect::<std::result::Result<_, _>>()?;
-            let edges: Vec<(usize, &Vec<Vec3>, &[u32])> = meshes
-                .iter()
-                .enumerate()
-                .flat_map(|(k, m)| m.edges.iter().enumerate().map(move |(i, e)| (k, e, m.edge_faces.get(i).map(Vec::as_slice).unwrap_or(&[]))))
-                .collect();
+                .map(|b| {
+                    let infos = b.body.edges(tolerance(b.body.size()))?;
+                    let rec = b.body.record();
+                    Ok(infos
+                        .into_iter()
+                        .map(|e| {
+                            let mut fs: Vec<u32> = rec.edges.get(e.index).map(|re| re.uses.iter().map(|u| u.face).collect()).unwrap_or_default();
+                            fs.sort_unstable();
+                            fs.dedup();
+                            (e.points, fs)
+                        })
+                        .collect())
+                })
+                .collect::<std::result::Result<_, solidcraft_kernel::KernelError>>()?;
+            let edges: Vec<(usize, &Vec<Vec3>, &[u32])> =
+                body_edges.iter().enumerate().flat_map(|(k, es)| es.iter().map(move |(e, fs)| (k, e, fs.as_slice()))).collect();
             let mut lines: Vec<&Vec<Vec3>> = Vec::new();
             let mut sides: Vec<(usize, &[u32])> = Vec::new();
             for (k, pick) in picks.iter().enumerate() {
@@ -772,7 +781,7 @@ pub fn default_reverse(doc: &Document, st: &ModelState, l: &MotionLink, c: &Cam)
         return Ok(off < 0.0);
     }
     let comp = component_of(doc, s.moving)?;
-    let bb = component_bodies(doc, st, comp).iter().fold(solidcraft_geom::Aabb3::EMPTY, |bb, b| bb.union(&b.mesh().bounds()));
+    let bb = component_bodies(doc, st, comp).iter().fold(solidcraft_geom::Aabb3::EMPTY, |bb, b| b.body.exact_bounds().map_or(bb, |eb| bb.union(&eb)));
     if bb.min.x > bb.max.x {
         return Ok(false);
     }

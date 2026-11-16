@@ -1639,7 +1639,7 @@ impl Body {
         };
         let mut out = Vec::with_capacity(self.face_count());
         for index in 0..self.face_count() {
-            let (area, centroid) = match ops.face_centroid(order, index, 1e-4) {
+            let (area, centroid) = match ops.face_centroid(order, index, 1e-8) {
                 Ok(c) => (c.area, Vec3::new(c.centroid[0], c.centroid[1], c.centroid[2])),
                 Err(_) => (0.0, Vec3::ZERO),
             };

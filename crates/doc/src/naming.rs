@@ -19,7 +19,7 @@ use solidcraft_geom::prelude::*;
 use std::sync::{Arc, OnceLock};
 
 use solidcore_record::{Vec2, Vec3};
-use solidcraft_geom::{Aabb3, Mesh};
+use solidcraft_geom::Aabb3;
 
 use crate::history_names::Names;
 use crate::lineage::Lineage;
@@ -169,34 +169,48 @@ const SAMPLES: usize = 9;
 /// part of (see [`geometric_names`]).
 const PANEL_SAMPLES: usize = 256;
 
-/// Unit normals of each face's triangles.
-fn normals(m: &Mesh, nf: usize) -> Vec<Vec<Vec3>> {
-    let mut per: Vec<Vec<Vec3>> = vec![Vec::new(); nf];
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-        if let (Some(v), Some([a, b, c])) = (per.get_mut(*f as usize), m.tri(t))
-            && let Some(n) = (b - a).cross(c - a).normalized()
-        {
-            v.push(n);
-        }
-    }
-    per
+/// Outward plane normal of each face (or two orthogonal vectors when curved).
+fn normals(b: &solidcraft_kernel::Body, nf: usize) -> Vec<Vec<Vec3>> {
+    (0..nf)
+        .map(|f| match b.face_plane_normal(f) {
+            Some(n) => vec![n],
+            None => vec![Vec3::X, Vec3::Y],
+        })
+        .collect()
 }
 
-/// Triangle centroids spread over each face: face → points.
-fn samples(m: &Mesh, nf: usize) -> Vec<Vec<Vec3>> {
-    samples_up_to(m, nf, SAMPLES)
+/// Sample points spread over each face: face → points.
+fn samples(b: &solidcraft_kernel::Body, nf: usize) -> Vec<Vec<Vec3>> {
+    samples_up_to(b, nf, SAMPLES)
 }
 
 /// [`samples`] with up to `most` points per face.
-fn samples_up_to(m: &Mesh, nf: usize, most: usize) -> Vec<Vec<Vec3>> {
-    let mut per: Vec<Vec<Vec3>> = vec![Vec::new(); nf];
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-        if let (Some(v), Some([a, b, c])) = (per.get_mut(*f as usize), m.tri(t)) {
-            v.push((a + b + c) * (1.0 / 3.0));
-        }
-    }
-    per.into_iter()
-        .map(|v| {
+fn samples_up_to(b: &solidcraft_kernel::Body, nf: usize, most: usize) -> Vec<Vec<Vec3>> {
+    let tol = (b.size() * 1e-4).max(1e-6);
+    (0..nf)
+        .map(|f| {
+            let mut v: Vec<Vec3> = Vec::new();
+            let internal = b.face_internal_point(f);
+            if let Some(ip) = internal {
+                v.push(ip);
+            }
+            for poly in b.face_edge_polylines(f) {
+                for p in poly {
+                    let cand = match internal {
+                        Some(ip) => p * 0.95 + ip * 0.05,
+                        None => p,
+                    };
+                    if internal.is_none() || b.face_distances(cand).get(f).is_some_and(|d| *d <= tol) {
+                        v.push(cand);
+                    }
+                    if let Some(ip) = internal {
+                        let mid = (p + ip) * 0.5;
+                        if b.face_distances(mid).get(f).is_some_and(|d| *d <= tol) {
+                            v.push(mid);
+                        }
+                    }
+                }
+            }
             if v.len() <= most {
                 return v;
             }
@@ -208,6 +222,7 @@ fn samples_up_to(m: &Mesh, nf: usize, most: usize) -> Vec<Vec<Vec3>> {
 
 /// The point of triangle `abc` nearest `p`. A zero-length edge (a cone's tip repeats its apex
 /// vertex) has no interior to project onto, so its branch is skipped rather than dividing 0 by 0.
+#[cfg(test)]
 pub(crate) fn closest(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     let (ab, ac, ap) = (b - a, c - a, p - a);
     let (d1, d2) = (ab.dot(ap), ac.dot(ap));
@@ -243,36 +258,23 @@ pub(crate) fn closest(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     a + ab * (vb / den) + ac * (vc / den)
 }
 
-/// A body's faces as triangle lists with bounding boxes, for "does this point lie on face f".
-struct FaceIndex {
-    faces: Vec<(Aabb3, Vec<[Vec3; 3]>)>,
+/// A body's faces indexed for exact "does this point lie on face f" queries.
+struct FaceIndex<'a> {
+    body: &'a solidcraft_kernel::Body,
+    bounds: Aabb3,
 }
 
-impl FaceIndex {
-    fn new(m: &Mesh, nf: usize) -> FaceIndex {
-        let mut faces: Vec<(Aabb3, Vec<[Vec3; 3]>)> = vec![(Aabb3::EMPTY, Vec::new()); nf];
-        for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-            if let (Some(slot), Some(tri)) = (faces.get_mut(*f as usize), m.tri(t)) {
-                slot.0.extend(tri);
-                slot.1.push(tri);
-            }
-        }
-        FaceIndex { faces }
+impl<'a> FaceIndex<'a> {
+    fn new(b: &'a ModelBody) -> FaceIndex<'a> {
+        FaceIndex { body: &b.body, bounds: b.outline_bounds() }
     }
 
     /// The face a point lies on (within `tol`).
     fn face_at(&self, p: Vec3, tol: f64) -> Option<usize> {
-        let mut best: Option<(f64, usize)> = None;
-        for (i, (bounds, tris)) in self.faces.iter().enumerate() {
-            if !bounds.inflated(tol).contains(p) {
-                continue;
-            }
-            let d = tris.iter().map(|[a, b, c]| closest(p, *a, *b, *c).dist(p)).fold(f64::MAX, f64::min);
-            if d <= tol && best.is_none_or(|(bd, _)| d < bd) {
-                best = Some((d, i));
-            }
+        if !self.bounds.inflated(tol).contains(p) {
+            return None;
         }
-        best.map(|(_, i)| i)
+        self.body.face_at(p, tol)
     }
 }
 
@@ -349,7 +351,7 @@ pub fn blend_seams(b: &ModelBody) -> Vec<BlendSeam> {
         })
     };
     let mut out = Vec::new();
-    for (edge, faces) in b.mesh().edge_faces.iter().enumerate() {
+    for (edge, (faces, _)) in b.body.edge_faces_and_points().into_iter().enumerate() {
         let [f, g] = faces.as_slice() else { continue };
         let (f, g) = (*f as usize, *g as usize);
         let kind = if blend(f) && blend(g) {
@@ -620,14 +622,13 @@ pub(crate) fn geometric_names(b: &ModelBody, o: &NamingOrigin, nf: usize) -> Vec
     {
         return face_names(input).as_ref().clone();
     }
-    let m = b.mesh();
     let size = b.body.size().max(1e-6);
     let tol = (size * 1e-4).max(1e-6);
-    let pts = samples(&m, nf);
-    let bb = m.bounds();
+    let pts = samples(&b.body, nf);
+    let bb = b.outline_bounds();
     // Inputs that overlap this body.
     let overlaps = |x: &ModelBody| {
-        let xb = x.mesh().bounds();
+        let xb = x.outline_bounds();
         !(xb.max.x < bb.min.x - tol
             || xb.min.x > bb.max.x + tol
             || xb.max.y < bb.min.y - tol
@@ -653,25 +654,16 @@ pub(crate) fn geometric_names(b: &ModelBody, o: &NamingOrigin, nf: usize) -> Vec
         .iter()
         .filter(|x| !independent_solid && !x.body.is_mesh() && overlaps(x))
         .take(64)
-        .map(|x| {
-            let n = face_count(x);
-            (x, FaceIndex::new(&x.mesh(), n), face_names(x))
-        })
+        .map(|x| (x, FaceIndex::new(x), face_names(x)))
         .collect();
     let fid = o.feature.id;
-    let ns = normals(&m, nf);
+    let ns = normals(&b.body, nf);
     let mut names: Vec<Option<String>> = pts.iter().map(|ps| vote(ps, &inputs, tol, None)).collect();
     // A pattern or mirror copy: its faces lie on its source's faces moved by one instance.
     let found = names.iter().filter(|n| n.is_some()).count();
     if !o.mats.is_empty() && found * 2 < nf.max(1) {
-        let all: Vec<(&ModelBody, FaceIndex, Arc<Vec<String>>)> = o
-            .before
-            .bodies
-            .iter()
-            .filter(|x| !x.body.is_mesh())
-            .take(64)
-            .map(|x| (x, FaceIndex::new(&x.mesh(), face_count(x)), face_names(x)))
-            .collect();
+        let all: Vec<(&ModelBody, FaceIndex, Arc<Vec<String>>)> =
+            o.before.bodies.iter().filter(|x| !x.body.is_mesh()).take(64).map(|x| (x, FaceIndex::new(x), face_names(x))).collect();
         let mut best: Option<(usize, usize, Vec<Option<String>>)> = None;
         for (k, mat) in o.mats.iter().enumerate() {
             let Some(inv) = crate::mat_inverse(mat) else { continue };
@@ -703,7 +695,7 @@ pub(crate) fn geometric_names(b: &ModelBody, o: &NamingOrigin, nf: usize) -> Vec
             // a flat face spans that panel, the panels laid out beside it and the bend strips
             // between them, whatever share of it they take. The few sample points above may all
             // miss it (a bend strip is many small triangles), so the face is looked at closer.
-            let dense = dense.get_or_insert_with(|| samples_up_to(&m, nf, PANEL_SAMPLES));
+            let dense = dense.get_or_insert_with(|| samples_up_to(&b.body, nf, PANEL_SAMPLES));
             if let Some(kept) = dense.get(fi).and_then(|ps| plurality(ps, input, tol)) {
                 *name = Some(kept);
                 continue;
@@ -760,16 +752,12 @@ fn behind(ps: &[Vec3], ns: &[Vec3], inputs: &[(&ModelBody, FaceIndex, Arc<Vec<St
     for p in ps {
         let mut best: Option<(f64, String)> = None;
         for (_, idx, nm) in inputs {
-            for (fi, (_, tris)) in idx.faces.iter().enumerate() {
-                for [a, b, c] in tris {
-                    if let Some(t) = ray_hit(*p, d, *a, *b, *c)
-                        && t > 1e-9
-                        && best.as_ref().is_none_or(|(bt, _)| t < *bt)
-                        && let Some(name) = nm.get(fi)
-                    {
-                        best = Some((t, name.clone()));
-                    }
-                }
+            if let Some((t, fi)) = idx.body.raycast_face(*p + d * 1e-6, d)
+                && t > 1e-9
+                && best.as_ref().is_none_or(|(bt, _)| t < *bt)
+                && let Some(name) = nm.get(fi)
+            {
+                best = Some((t, name.clone()));
             }
         }
         if let Some((_, n)) = best {
@@ -781,27 +769,6 @@ fn behind(ps: &[Vec3], ns: &[Vec3], inputs: &[(&ModelBody, FaceIndex, Arc<Vec<St
     }
     votes.sort_by_key(|v| std::cmp::Reverse(v.1));
     votes.first().filter(|(_, k)| *k * 2 >= ps.len().max(1)).map(|(n, _)| n.clone())
-}
-
-pub(crate) fn ray_hit(o: Vec3, d: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Option<f64> {
-    let (e1, e2) = (b - a, c - a);
-    let h = d.cross(e2);
-    let det = e1.dot(h);
-    if det.abs() < 1e-14 {
-        return None;
-    }
-    let f = 1.0 / det;
-    let s = o - a;
-    let u = f * s.dot(h);
-    if !(0.0..=1.0).contains(&u) {
-        return None;
-    }
-    let q = s.cross(e1);
-    let v = f * d.dot(q);
-    if v < 0.0 || u + v > 1.0 {
-        return None;
-    }
-    Some(f * e2.dot(q))
 }
 
 /// The input face most of a face's sample points lie on (mapped by `map` first), if it holds
@@ -1262,7 +1229,6 @@ pub fn face_name_at_body(body: &ModelBody, point: Vec3) -> Option<String> {
 /// solids that hold as many (two alike in one place), the one the file names it after.
 pub fn carried_face_names(part: &ModelState, imported: &[solidcraft_kernel::ImportedBody]) -> Vec<Vec<String>> {
     let solids: Vec<&ModelBody> = part.bodies.iter().filter(|b| !b.body.is_mesh()).collect();
-    let indices: Vec<OnceLock<Option<FaceIndex>>> = solids.iter().map(|_| OnceLock::new()).collect();
     imported
         .iter()
         .map(|read| {
@@ -1270,20 +1236,16 @@ pub fn carried_face_names(part: &ModelState, imported: &[solidcraft_kernel::Impo
             let points: Vec<Option<Vec3>> = face_spots(&probe).into_iter().map(|s| s.map(|s| s.point)).collect();
             let best = solids
                 .iter()
-                .zip(&indices)
-                .filter_map(|(b, index)| {
+                .filter_map(|b| {
+                    if face_count(b) > 50_000 {
+                        return None;
+                    }
                     let tol = (b.body.size() * 2e-3).max(1e-3);
                     let near = b.outline_bounds().inflated(tol);
                     if !points.iter().flatten().any(|p| near.contains(*p)) {
                         return None;
                     }
-                    // Like face_name_at_body, a body too large to index is left unnamed.
-                    let index = index
-                        .get_or_init(|| {
-                            let mesh = b.mesh();
-                            (mesh.triangles.len() <= 2_000_000 && face_count(b) <= 50_000).then(|| FaceIndex::new(&mesh, face_count(b)))
-                        })
-                        .as_ref()?;
+                    let index = FaceIndex::new(b);
                     let hits: Vec<Option<usize>> = points.iter().map(|p| p.and_then(|p| index.face_at(p, tol))).collect();
                     Some((hits.iter().flatten().count(), *b, hits))
                 })
@@ -1527,21 +1489,13 @@ mod tests {
     #[test]
     fn merged_face_votes_collectively_for_pieces_of_one_source() {
         let body = ModelBody::new("Input".into(), solidcraft_kernel::box_solid(Vec3::ZERO, Vec3::new(4., 1., 1.)).unwrap(), 1);
-        let mut mesh = Mesh::default();
-        let mut points = Vec::new();
-        for i in 0..3u32 {
-            let x = f64::from(i);
-            mesh.positions.extend([Vec3::new(x, 0., 0.), Vec3::new(x + 0.8, 0., 0.), Vec3::new(x, 0.8, 0.)]);
-            mesh.triangles.push([i * 3, i * 3 + 1, i * 3 + 2]);
-            mesh.tri_face.push(i);
-            points.push(Vec3::new(x + 0.2, 0.2, 0.));
-        }
+        let points: Vec<Vec3> = (0..3).map(|f| body.body.face_internal_point(f).unwrap()).collect();
         let pieces = Arc::new(vec!["F1:side:wall#1".into(), "F1:side:wall#2".into(), "F1:side:wall#3".into()]);
-        assert_eq!(vote(&points, &[(&body, FaceIndex::new(&mesh, 3), pieces)], 1e-8, None).as_deref(), Some("F1:side:wall"));
+        assert_eq!(vote(&points, &[(&body, FaceIndex::new(&body), pieces)], 1e-4, None).as_deref(), Some("F1:side:wall"));
         let distinct = Arc::new(vec!["F1:side:wall#1".into(), "F2:side:wall#2".into(), "F3:side:wall#3".into()]);
-        let inputs = [(&body, FaceIndex::new(&mesh, 3), distinct)];
-        assert_eq!(vote(&points, &inputs, 1e-8, None), None);
-        assert_eq!(vote(&points[..2], &inputs, 1e-8, None), None, "equal different-source votes must not pick a lexicographic winner");
+        let inputs = [(&body, FaceIndex::new(&body), distinct)];
+        assert_eq!(vote(&points, &inputs, 1e-4, None), None);
+        assert_eq!(vote(&points[..2], &inputs, 1e-4, None), None, "equal different-source votes must not pick a lexicographic winner");
     }
 
     #[cfg(not(target_arch = "wasm32"))]

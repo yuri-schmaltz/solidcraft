@@ -52,7 +52,7 @@ use std::collections::BTreeMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use solidcore_record::{Loop2, Plane, Region2, Seg2, Vec2, Vec3};
-use solidcraft_geom::{Mesh, Ring, UnitVec3};
+use solidcraft_geom::{Ring, UnitVec3};
 use solidcraft_kernel::{Body, FaceSurface, face_surface};
 
 use super::{FlatWork, ReliefOverride, RuleValues, SheetBody, SheetFlange, base_flange, polys_cross, signed_area, snap};
@@ -204,18 +204,16 @@ fn joined_lines(segs: impl IntoIterator<Item = Seg2>, tol: f64) -> Vec<Seg2> {
 /// Face `f` of the body as a panel outline. Only a planar face can be one. Its loops are read
 /// exactly, as a plate's are (an arc where one runs along a round wall standing square on the
 /// face): the outer one is the outline, the others are its holes.
-fn outline(b: &Body, mesh: &Mesh, f: usize, tol: f64) -> Result<Face> {
+fn outline(b: &Body, edge_data: &[(Vec<u32>, Vec<Vec3>)], f: usize, tol: f64) -> Result<Face> {
     let Some(FaceSurface::Plane { normal: n, point }) = face_surface(b, f) else {
         return err("not supported yet: curved faces in a converted sheet (only planar faces convert)");
     };
     let plane = Plane::from_normal(point, n).ok_or_else(|| DocError::Invalid("a face of the body has no plane".into()))?;
     // Its edges, each with the face on its other side.
-    let mut edges: Vec<(&[Vec3], Option<usize>)> = mesh
-        .edges
+    let mut edges: Vec<(&[Vec3], Option<usize>)> = edge_data
         .iter()
-        .zip(&mesh.edge_faces)
-        .filter(|(line, faces)| line.len() >= 2 && faces.iter().any(|g| *g as usize == f))
-        .map(|(line, faces)| (line.as_slice(), faces.iter().map(|g| *g as usize).find(|g| *g != f)))
+        .filter(|(faces, line)| line.len() >= 2 && faces.iter().any(|g| *g as usize == f))
+        .map(|(faces, line)| (line.as_slice(), faces.iter().map(|g| *g as usize).find(|g| *g != f)))
         .collect();
     // Chained head to tail, they close the outline and its holes: each point with the face the
     // loop runs along from it to the next point.
@@ -298,23 +296,27 @@ fn outline(b: &Body, mesh: &Mesh, f: usize, tol: f64) -> Result<Face> {
 
 /// The face straight through the material behind planar face `f`, when it is parallel to it,
 /// and how far behind it lies.
-fn behind(b: &Body, mesh: &Mesh, f: usize) -> Option<(usize, f64)> {
+fn behind(b: &Body, f: usize) -> Option<(usize, f64)> {
     let Some(FaceSurface::Plane { normal: n, point: o }) = face_surface(b, f) else { return None };
-    // The face most of it looks through to, from points in its largest triangles: a few of them
-    // may look at the floor of a label engraved in the other skin.
-    let area = |t: &[Vec3; 3]| (t[1] - t[0]).cross(t[2] - t[0]).len();
-    let mut tris: Vec<[Vec3; 3]> =
-        mesh.triangles.iter().zip(&mesh.tri_face).filter(|(_, g)| **g as usize == f).filter_map(|(t, _)| mesh.tri(t)).collect();
-    tris.sort_by(|x, y| area(y).total_cmp(&area(x)));
-    let mut seen: Vec<(usize, f64)> = Vec::new();
-    for tri in tris.iter().take(8) {
-        let middle = (tri[0] + tri[1] + tri[2]) * (1.0 / 3.0);
-        for from in std::iter::once(middle).chain(tri.iter().map(|v| (middle + *v) * 0.5)) {
-            let Some(g) = mesh.raycast(from, n * -1.0).and_then(|(_, hit)| mesh.tri_face.get(hit)).map(|g| *g as usize) else { continue };
-            match seen.iter_mut().find(|(h, _)| *h == g) {
-                Some(entry) => entry.1 += area(tri),
-                None => seen.push((g, area(tri))),
+    let infos = b.faces(0.0).ok()?;
+    let internal = b.face_internal_point(f)?;
+    let tol = (b.size() * 1e-4).max(1e-6);
+    let mut probes = vec![internal];
+    for poly in b.face_edge_polylines(f) {
+        if let Some(&mid) = poly.get(poly.len() / 2) {
+            let cand = (internal + mid) * 0.5;
+            if b.face_distances(cand).get(f).is_some_and(|d| *d <= tol) {
+                probes.push(cand);
             }
+        }
+    }
+    let mut seen: Vec<(usize, f64)> = Vec::new();
+    for from in probes {
+        let Some((_, g)) = b.raycast_face(from - *n * 1e-5, *n * -1.0) else { continue };
+        let w = infos.get(g).map_or(1.0, |info| info.area.max(1e-9));
+        match seen.iter_mut().find(|(h, _)| *h == g) {
+            Some(entry) => entry.1 += w,
+            None => seen.push((g, w)),
         }
     }
     let g = seen.iter().max_by(|x, y| x.1.total_cmp(&y.1))?.0;
@@ -337,20 +339,18 @@ struct Chamfer {
 /// along two parallel edges, the two faces' planes crossing in a line parallel to them and the
 /// strip facing between the two (as the chord of a bend's arc does). A point on any other face,
 /// or near a chamfer's edge, picks an edge as before.
-fn chamfer_at(mb: &ModelBody, mesh: &Mesh, p: Vec3, tol: f64, near: f64) -> Option<Chamfer> {
+fn chamfer_at(mb: &ModelBody, edge_data: &[(Vec<u32>, Vec<Vec3>)], p: Vec3, tol: f64, near: f64) -> Option<Chamfer> {
     let b = &mb.body;
     let (d, f) = crate::appearance::nearest_face(mb, p)?;
     if d <= near {
-        if let Some(c) = bend_cylinder(b, mesh, f, tol) {
+        if let Some(c) = bend_cylinder(b, edge_data, f, tol) {
             return Some(c);
         }
         // A tangent edge belongs to both the cylinder and a planar panel. The nearest
         // face can be either: resolve the cylinder from the edge's incident faces too.
-        let edge = mesh
-            .edges
+        let edge = edge_data
             .iter()
-            .zip(&mesh.edge_faces)
-            .map(|(line, faces)| {
+            .map(|(faces, line)| {
                 let distance = line
                     .windows(2)
                     .filter_map(|w| match w {
@@ -362,7 +362,7 @@ fn chamfer_at(mb: &ModelBody, mesh: &Mesh, p: Vec3, tol: f64, near: f64) -> Opti
             })
             .min_by(|a, b| a.0.total_cmp(&b.0));
         if let Some((_, faces)) = edge.filter(|(distance, _)| *distance <= near)
-            && let Some(c) = faces.iter().find_map(|g| bend_cylinder(b, mesh, *g as usize, tol))
+            && let Some(c) = faces.iter().find_map(|g| bend_cylinder(b, edge_data, *g as usize, tol))
         {
             return Some(c);
         }
@@ -370,7 +370,7 @@ fn chamfer_at(mb: &ModelBody, mesh: &Mesh, p: Vec3, tol: f64, near: f64) -> Opti
     if d > tol {
         return None;
     }
-    let strip = outline(b, mesh, f, tol).ok()?;
+    let strip = outline(b, edge_data, f, tol).ok()?;
     let plane = |g: usize| match face_surface(b, g) {
         Some(FaceSurface::Plane { normal, .. }) => Some(normal),
         _ => None,
@@ -402,10 +402,10 @@ fn chamfer_at(mb: &ModelBody, mesh: &Mesh, p: Vec3, tol: f64, near: f64) -> Opti
 /// Face `f` as a bend modelled with its radius: a cylinder with a planar face tangent to it
 /// along a straight edge parallel to its axis on either side, the two planes crossing in a line
 /// (a bend between 0 and 180°). Other faces along it (the walls of a notch) don't count.
-fn bend_cylinder(b: &Body, mesh: &Mesh, f: usize, tol: f64) -> Option<Chamfer> {
+fn bend_cylinder(b: &Body, edge_data: &[(Vec<u32>, Vec<Vec3>)], f: usize, tol: f64) -> Option<Chamfer> {
     let Some(FaceSurface::Cylinder { origin, axis, .. }) = face_surface(b, f) else { return None };
     let mut sides: Vec<(usize, Vec3)> = Vec::new();
-    for (line, faces) in mesh.edges.iter().zip(&mesh.edge_faces) {
+    for (faces, line) in edge_data {
         let g = match *faces.as_slice() {
             [x, y] if x as usize == f => y as usize,
             [x, y] if y as usize == f => x as usize,
@@ -429,7 +429,7 @@ fn bend_cylinder(b: &Body, mesh: &Mesh, f: usize, tol: f64) -> Option<Chamfer> {
 
 /// Every piece of bend cylinder `c`'s cylinder (the same axis line and radius) that is a bend
 /// cylinder between the same two faces: the pieces cut-outs across a bend leave of it. `c` too.
-fn bend_pieces(b: &Body, mesh: &Mesh, c: Chamfer, tol: f64) -> Vec<Chamfer> {
+fn bend_pieces(b: &Body, edge_data: &[(Vec<u32>, Vec<Vec3>)], c: Chamfer, tol: f64) -> Vec<Chamfer> {
     let Some(FaceSurface::Cylinder { origin, axis, radius }) = face_surface(b, c.strip) else { return vec![c] };
     let coaxial = |g: usize| match face_surface(b, g) {
         Some(FaceSurface::Cylinder { origin: o, axis: a, radius: r }) => {
@@ -438,18 +438,18 @@ fn bend_pieces(b: &Body, mesh: &Mesh, c: Chamfer, tol: f64) -> Vec<Chamfer> {
         _ => false,
     };
     let same = |o: &Chamfer| (o.a, o.b) == (c.a, c.b) || (o.a, o.b) == (c.b, c.a);
-    let pieces = (0..b.face_count()).filter(|g| *g != c.strip && coaxial(*g)).filter_map(|g| bend_cylinder(b, mesh, g, tol)).filter(same);
+    let pieces = (0..b.face_count()).filter(|g| *g != c.strip && coaxial(*g)).filter_map(|g| bend_cylinder(b, edge_data, g, tol)).filter(same);
     std::iter::once(c).chain(pieces).collect()
 }
 
 /// The cylinder of bend `c` on a shell's other skin: the bend cylinder between the faces
 /// straight behind `c`'s two sides, so that a bend picked on either skin is that bend on both.
-fn other_skin(b: &Body, mesh: &Mesh, c: &Chamfer, tol: f64) -> Option<Chamfer> {
-    let (x, y) = (behind(b, mesh, c.a)?.0, behind(b, mesh, c.b)?.0);
-    let beside_x = mesh.edge_faces.iter().filter(|faces| faces.contains(&(x as u32))).flatten().map(|g| *g as usize);
+fn other_skin(b: &Body, edge_data: &[(Vec<u32>, Vec<Vec3>)], c: &Chamfer, tol: f64) -> Option<Chamfer> {
+    let (x, y) = (behind(b, c.a)?.0, behind(b, c.b)?.0);
+    let beside_x = edge_data.iter().filter(|(faces, _)| faces.contains(&(x as u32))).flat_map(|(faces, _)| faces.iter()).map(|g| *g as usize);
     beside_x
         .filter(|g| *g != x && *g != c.strip)
-        .find_map(|g| bend_cylinder(b, mesh, g, tol).filter(|o| (o.a, o.b) == (x, y) || (o.a, o.b) == (y, x)))
+        .find_map(|g| bend_cylinder(b, edge_data, g, tol).filter(|o| (o.a, o.b) == (x, y) || (o.a, o.b) == (y, x)))
 }
 
 /// Face `g`'s outline with each picked chamfer along it taken out: the edge along the chamfer
@@ -817,9 +817,10 @@ fn drawn_edge(trimmed: &[Vec2], from: &[Option<usize>], pts: &[Vec2], round: &[O
 /// chamfer's or cylinder's point.
 pub fn bend_edge_names(st: &crate::ModelState, body: &str, pts: &[Vec3]) -> Vec<String> {
     let Some(b) = st.body(body) else { return Vec::new() };
-    let (mesh, near, tol) = (b.mesh(), (b.body.size() * 2e-3).max(1e-3), (b.body.size() * 1e-6).max(1e-6));
+    let (edge_data, near, tol) = (b.body.edge_faces_and_points(), (b.body.size() * 2e-3).max(1e-3), (b.body.size() * 1e-6).max(1e-6));
     let on = |p: &Vec3| {
-        chamfer_at(b, &mesh, *p, tol, near).is_none() && mesh.edges.iter().any(|e| e.windows(2).any(|w| p.dist_to_segment(w[0], w[1]) <= near))
+        chamfer_at(b, &edge_data, *p, tol, near).is_none()
+            && edge_data.iter().any(|(_, e)| e.windows(2).any(|w| p.dist_to_segment(w[0], w[1]) <= near))
     };
     pts.iter().zip(crate::naming::edge_names_at(b, pts)).map(|(p, name)| if on(p) { name } else { String::new() }).collect()
 }
@@ -843,7 +844,7 @@ pub fn convert_body(
         return err(format!("pick 1…{MAX_BENDS} bend edges"));
     }
     let rv = values(None)?;
-    let (b, mesh) = (&mb.body, mb.mesh());
+    let (b, edge_data) = (&mb.body, mb.body.edge_faces_and_points());
     let size = b.size();
     if !(size.is_finite() && size > 0.0) {
         return err("the body has no size");
@@ -858,10 +859,10 @@ pub fn convert_body(
     let mut picks = Vec::with_capacity(bends.len());
     let mut chamfers: Vec<Chamfer> = Vec::new();
     for p in bends {
-        if let Some(c) = chamfer_at(mb, &mesh, *p, tol, near) {
+        if let Some(c) = chamfer_at(mb, &edge_data, *p, tol, near) {
             picks.push((*p, (c.a, c.b)));
             // Every piece of the bend, on either skin: cut-outs across it split its cylinder.
-            for c in std::iter::once(c).chain(other_skin(b, &mesh, &c, tol)).flat_map(|c| bend_pieces(b, &mesh, c, tol)) {
+            for c in std::iter::once(c).chain(other_skin(b, &edge_data, &c, tol)).flat_map(|c| bend_pieces(b, &edge_data, c, tol)) {
                 if !chamfers.iter().any(|x| x.strip == c.strip) {
                     chamfers.push(c);
                 }
@@ -869,7 +870,7 @@ pub fn convert_body(
             continue;
         }
         let dist = |e: &Vec<Vec3>| e.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min);
-        let edge = mesh.edges.iter().zip(&mesh.edge_faces).map(|(e, faces)| (dist(e), faces)).min_by(|x, y| x.0.total_cmp(&y.0));
+        let edge = edge_data.iter().map(|(faces, e)| (dist(e), faces)).min_by(|x, y| x.0.total_cmp(&y.0));
         match edge.filter(|(d, _)| *d <= near).map(|(_, faces)| faces.as_slice()) {
             Some(&[x, y]) if x != y => picks.push((*p, (x as usize, y as usize))),
             Some(_) => return err(format!("the edge at the bend point {} does not lie between two faces", at(*p))),
@@ -879,12 +880,12 @@ pub fn convert_body(
     if let Some((p, _)) = picks.iter().find(|(_, (x, y))| chamfers.iter().any(|c| c.strip == *x || c.strip == *y)) {
         return err(format!("the bend at {} is on a chamfer picked as a bend (pick the chamfer or its edges, not both)", at(*p)));
     }
-    let face_of = |f: usize| outline(b, &mesh, f, tol).and_then(|face| without_chamfers(b, face, f, &chamfers, tol));
+    let face_of = |f: usize| outline(b, &edge_data, f, tol).and_then(|face| without_chamfers(b, face, f, &chamfers, tol));
     let fixed = face_of(f0).map_err(|e| DocError::Invalid(format!("the fixed face can't be a face of the sheet: {e}")))?;
     // A shell: the same small distance of material behind the fixed face and the faces at every
     // bend. It keeps its thickness, and a bend picked on one skin is that bend on the other too.
-    let thin = behind(b, &mesh, f0).map(|(_, d)| d).filter(|d| *d > 0.0 && d * d * 16.0 <= area_about(&fixed.pts, fixed.n));
-    let wall = |f: usize, d: f64| behind(b, &mesh, f).filter(|(_, e)| (e - d).abs() <= 1e-6 * d.max(1.0)).map(|(g, _)| g);
+    let thin = behind(b, f0).map(|(_, d)| d).filter(|d| *d > 0.0 && d * d * 16.0 <= area_about(&fixed.pts, fixed.n));
+    let wall = |f: usize, d: f64| behind(b, f).filter(|(_, e)| (e - d).abs() <= 1e-6 * d.max(1.0)).map(|(g, _)| g);
     let backs: Vec<Option<(usize, usize)>> = picks.iter().map(|(_, (x, y))| thin.and_then(|d| Some((wall(*x, d)?, wall(*y, d)?)))).collect();
     let shell = thin.filter(|_| backs.iter().all(Option::is_some));
     // On a shell, the face behind each face at a bend (its other skin, read for its pockets).
@@ -904,7 +905,7 @@ pub fn convert_body(
     }
     let r = rv.bend_radius;
     let joined = |x: usize, y: usize| {
-        mesh.edge_faces.iter().any(|faces| faces.contains(&(x as u32)) && faces.contains(&(y as u32)))
+        edge_data.iter().any(|(faces, _)| faces.contains(&(x as u32)) && faces.contains(&(y as u32)))
             || chamfers.iter().any(|c| (c.a, c.b) == (x, y) || (c.a, c.b) == (y, x))
     };
     let mut todo: Vec<(Vec3, Vec<(usize, usize)>)> = Vec::with_capacity(picks.len());
@@ -984,8 +985,12 @@ pub fn convert_body(
     // How far behind a face of the sheet the body's face `g` starts and ends: a hole's wall
     // reaches through the sheet, a pocket's ends on its floor, an island's starts at the face.
     let mut points: BTreeMap<usize, Vec<Vec3>> = BTreeMap::new();
-    for (tri, g) in mesh.triangles.iter().zip(&mesh.tri_face) {
-        points.entry(*g as usize).or_default().extend(tri.iter().filter_map(|k| mesh.positions.get(*k as usize)));
+    for g in 0..b.face_count() {
+        let mut pts: Vec<Vec3> = b.face_edge_polylines(g).into_iter().flatten().collect();
+        if let Some(ip) = b.face_internal_point(g) {
+            pts.push(ip);
+        }
+        points.insert(g, pts);
     }
     let span = |g: usize, face: &Face| {
         let o = face.pts.first().copied().unwrap_or_default();
@@ -1071,7 +1076,7 @@ pub fn convert_body(
             None => sh.base.clone(),
             Some(i) => sh.flanges.get(i).map(|f| sh.panel(f)).unwrap_or_default(),
         };
-        let back = skin_behind.get(&pf).and_then(|g| outline(b, &mesh, *g, tol).ok());
+        let back = skin_behind.get(&pf).and_then(|g| outline(b, &edge_data, *g, tol).ok());
         let skins: Vec<(&Face, bool)> = std::iter::once((&panel.face, true)).chain(back.as_ref().map(|f| (f, false))).collect();
         let bound = if skins.iter().all(|(f, _)| f.holes.is_empty()) { Ring::default() } else { region.outer.ccw().polyline(1e-3) };
         for (face, front) in skins {
@@ -1102,11 +1107,10 @@ pub fn convert_body(
                     return pocket("has walls of more than one depth");
                 }
                 // Its floors: the faces at its depth beside its walls, facing out as the face does.
-                let mut floors: Vec<usize> = mesh
-                    .edge_faces
+                let mut floors: Vec<usize> = edge_data
                     .iter()
-                    .filter(|fs| fs.iter().any(|g| walls.contains(&(*g as usize))))
-                    .flatten()
+                    .filter(|(fs, _)| fs.iter().any(|g| walls.contains(&(*g as usize))))
+                    .flat_map(|(fs, _)| fs.iter())
                     .map(|g| *g as usize)
                     .filter(|g| {
                         !walls.contains(g)
@@ -1125,7 +1129,7 @@ pub fn convert_body(
                 // The islands left standing in it (a letter's counter): walls from a floor up to the face.
                 let mut islands = Vec::new();
                 for g in floors {
-                    let floor = outline(b, &mesh, g, tol)?;
+                    let floor = outline(b, &edge_data, g, tol)?;
                     for (k, kw) in &floor.holes {
                         let (start, lo, hi) = walls_span(kw, face);
                         if start > eps || (lo - reach).abs() > eps || (hi - reach).abs() > eps {
