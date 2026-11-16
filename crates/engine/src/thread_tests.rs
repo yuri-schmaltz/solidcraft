@@ -174,11 +174,43 @@ fn faceted_flange_thread_preserves_thin_crest_boundaries() {
     let (start, end) = (cylinder.start - pitch, cylinder.end + pitch);
     let base = cylinder.axis_point + cylinder.axis * start;
     let plane = Plane { origin: base, x: cylinder.axis.cross(Vec3::new(1.0, 0.0, 0.0)).normalized().unwrap(), y: *cylinder.axis };
-    let region = solidcore_record::Region2 { outer: solidcore_record::Loop2::polygon(&section), holes: vec![] };
-    let groove = kernel::sweep_helix(&plane, &region, base, *cylinder.axis, pitch, (end - start) / pitch)
-        .unwrap()
-        .mesh(&solidcraft_kernel::MeshTolerance::chord(0.005))
-        .unwrap();
+    let groove = {
+        use solidcraft_geom::MeshGeom;
+        let k = *cylinder.axis;
+        let m = section.len();
+        let turns = (end - start) / pitch;
+        let stations = 48usize;
+        let n = (turns * stations as f64).ceil() as usize;
+        let total = std::f64::consts::TAU * turns;
+        let mut mesh = solidcraft_geom::Mesh::default();
+        for i in 0..=n {
+            let a = total * i as f64 / n as f64;
+            for q in &section {
+                let w = plane.to_world(*q);
+                let v = w - base;
+                let rotated = v * a.cos() + k.cross(v) * a.sin() + k * (k.dot(v) * (1.0 - a.cos()));
+                mesh.positions.push(base + rotated + k * (pitch * a / std::f64::consts::TAU));
+            }
+        }
+        let id = |i: usize, j: usize| u32::try_from(i * m + j % m).unwrap_or(0);
+        for i in 0..n {
+            for j in 0..m {
+                mesh.triangles.push([id(i, j), id(i + 1, j), id(i + 1, j + 1)]);
+                mesh.triangles.push([id(i, j), id(i + 1, j + 1), id(i, j + 1)]);
+            }
+        }
+        for j in 1..m - 1 {
+            mesh.triangles.push([id(0, 0), id(0, j), id(0, j + 1)]);
+            mesh.triangles.push([id(n, 0), id(n, j + 1), id(n, j)]);
+        }
+        mesh.tri_face = vec![0; mesh.triangles.len()];
+        if mesh.measure().volume < 0.0 {
+            for t in &mut mesh.triangles {
+                t.swap(1, 2);
+            }
+        }
+        mesh
+    };
     let cut = kernel::faceted_boolean(body, &groove, kernel::BoolOp::Cut, pitch * 0.005).unwrap().unwrap();
     assert!(cut.validity().is_empty(), "{:?}", cut.validity());
     let before = body.mesh(&solidcraft_kernel::MeshTolerance::chord(0.001)).unwrap().measure().volume;

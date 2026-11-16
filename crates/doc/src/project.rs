@@ -81,8 +81,8 @@ fn cache_key(st: &ModelState, plane: &Plane, kind: LinkKind, src: &LinkSource) -
         .bodies
         .iter()
         .map(|b| {
-            let m = b.mesh();
-            format!("{}@{:p}/{}/{:?}", b.name, std::sync::Arc::as_ptr(&m), m.triangles.len(), m.bounds())
+            let m = b.display_mesh();
+            format!("{}@{:p}/{}/{:?}", b.name, std::sync::Arc::as_ptr(&m), m.tri_indices().len(), m.bounds())
         })
         .collect();
     Some(format!("{kind:?}|{src:?}|{plane:?}|{}", bodies.join(";")))
@@ -187,7 +187,7 @@ fn resolve_uncached(
         }
         LinkSource::Body { body } => {
             let b = st.body(body).ok_or_else(|| lost(&format!("body {body}")))?;
-            let mesh = b.mesh();
+            let mesh = b.display_mesh();
             match kind {
                 LinkKind::Intersect => section(plane, &mesh, None),
                 _ => silhouette(plane, &mesh, Some(&b.body)),
@@ -321,9 +321,9 @@ fn resolve_uncached(
         }
         LinkSource::Spun { body, origin, dir } => {
             let b = st.body(body).ok_or_else(|| lost(&format!("body {body}")))?;
-            let pts = crate::project3d::spun_outline(&b.mesh(), *origin, *dir, plane);
+            let pts = crate::project3d::spun_outline(&b.display_mesh(), *origin, *dir, plane);
             let mut g = Vec::new();
-            fit_chain(&pts, Some(b.mesh().bounds().diagonal().max(1e-9) * 2e-3), &mut g);
+            fit_chain(&pts, Some(b.outline_bounds().diagonal().max(1e-9) * 2e-3), &mut g);
             g
         }
         LinkSource::SketchPoint { sketch, point } => {
@@ -464,7 +464,7 @@ fn first_hits(
     toward: Vec3,
 ) -> Result<Vec<(solidcore_record::brep::Curve, [f64; 2])>> {
     let Some(dir) = toward.normalized() else { return Ok(curves) };
-    let mesh = target.mesh();
+    let mesh = target.display_mesh();
     let reach = 2.0 * mesh.bounds().diagonal().max(1e-9);
     let slack = 4.0 * target.display_tol();
     let mut kept = Vec::with_capacity(curves.len());
@@ -472,7 +472,7 @@ fn first_hits(
         let eval = solidcraft_geom::brep::eval::CurveEval::new(&curve).map_err(|e| DocError::Invalid(format!("projected curve: {e}")))?;
         let mid = eval.point(0.5 * (interval[0] + interval[1])).ok_or_else(|| DocError::Invalid("projected curve: no middle point".into()))?;
         let origin = mid - dir * reach;
-        let front = mesh.raycast(origin, dir).is_some_and(|(t, _)| t < reach - slack);
+        let front = target.body.raycast_face(origin, dir).or_else(|| mesh.raycast(origin, dir)).is_some_and(|(t, _)| t < reach - slack);
         if !front {
             kept.push((curve, interval));
         }
@@ -605,7 +605,7 @@ fn exact_edges(body: &crate::ModelBody, plane: &Plane, edges: &[usize]) -> Vec<O
             None if body.body.is_mesh() => None,
             None => {
                 // Not read: its polyline lies on the curve, but only many points of it show a circle.
-                let pts = mesh.get_or_insert_with(|| body.mesh()).edges.get(*e).filter(|pts| pts.len() > 8)?;
+                let pts = mesh.get_or_insert_with(|| body.display_mesh()).edges.get(*e).filter(|pts| pts.len() > 8)?;
                 let level = plane.height(*pts.first()?);
                 let (g, radius) = circular(&pts.iter().map(|p| plane.to_local(*p)).collect::<Vec<_>>())?;
                 pts.iter().all(|p| (plane.height(*p) - level).abs() <= radius * CIRCLE_TOL).then(|| vec![g])
@@ -1037,7 +1037,7 @@ fn locate_named_vertex(st: &ModelState, kind: LinkKind, body: &str, name: &str, 
 /// moved onto it.
 fn resolve_named_edge(st: &ModelState, plane: &Plane, kind: LinkKind, body: &str, index: usize, near: Vec3) -> Result<Resolved> {
     let target = st.body(body).ok_or_else(|| lost("named projection body"))?;
-    let pts = target.mesh().edges.get(index).cloned().unwrap_or_default();
+    let pts = target.body.edge_points(index).unwrap_or_else(|| target.display_mesh().edges.get(index).cloned().unwrap_or_default());
     let at = pts
         .windows(2)
         .filter_map(|w| Some(closest_on_segment(near, *w.first()?, *w.get(1)?)))
@@ -1081,8 +1081,8 @@ fn resolve_named_vertex(plane: &Plane, body: &str, index: usize, at: Vec3) -> Re
 
 fn resolve_named_face(st: &ModelState, plane: &Plane, kind: LinkKind, body: &str, index: usize, at: Vec3) -> Result<Resolved> {
     let target = st.body(body).ok_or_else(|| lost("named projection body"))?;
-    let mesh = target.mesh();
-    if mesh.triangles.len() > 2_000_000 || mesh.edges.len() > 2_000_000 {
+    let mesh = target.display_mesh();
+    if mesh.tri_indices().len() > 2_000_000 || mesh.edges.len() > 2_000_000 {
         return Err(DocError::Invalid("named face projection work limit exceeded".into()));
     }
     let face_index = Some(index);
@@ -1147,11 +1147,11 @@ pub fn resolve_anchored_face(doc: &Document, st: &ModelState, plane: &Plane, kin
 /// Callers retaining a link must supply their own replay identity policy.
 pub fn resolve_face_indices(st: &ModelState, plane: &Plane, kind: LinkKind, body_name: &str, indices: &[usize]) -> Result<Resolved> {
     let body = st.body(body_name).ok_or_else(|| lost("projection body"))?;
-    let mesh = body.mesh();
-    if mesh.triangles.len() > 2_000_000 || indices.len() > 10_000 {
+    let mesh = body.display_mesh();
+    if mesh.tri_indices().len() > 2_000_000 || indices.len() > 10_000 {
         return Err(DocError::Invalid("anchored projection work limit exceeded".into()));
     }
-    let work = mesh.triangles.len().saturating_add(mesh.edges.len()).saturating_mul(indices.len());
+    let work = mesh.tri_indices().len().saturating_add(mesh.edges.len()).saturating_mul(indices.len());
     if work > 10_000_000 {
         return Err(DocError::Invalid("anchored projection aggregate work limit exceeded".into()));
     }
@@ -1181,11 +1181,14 @@ pub fn resolve_face_indices(st: &ModelState, plane: &Plane, kind: LinkKind, body
     if kind != LinkKind::Intersect && (indices.len() > 1 || indices.first().is_some_and(|index| certified_planar_construction(body, *index))) {
         geometry = merge_family_lines(geometry)?;
     }
-    let point = mesh
-        .triangles
+    let point = indices
         .iter()
-        .zip(&mesh.tri_face)
-        .find_map(|(triangle, face)| selected.contains(&(*face as usize)).then(|| mesh.tri(triangle)).flatten().map(|[a, b, c]| (a + b + c) / 3.0))
+        .find_map(|&f| body.body.face_internal_point(f))
+        .or_else(|| {
+            mesh.tri_indices().iter().zip(&mesh.tri_face).find_map(|(triangle, face)| {
+                selected.contains(&(*face as usize)).then(|| mesh.tri(triangle)).flatten().map(|[a, b, c]| (a + b + c) / 3.0)
+            })
+        })
         .ok_or_else(|| lost("anchored projection face"))?;
     if geometry.is_empty() {
         return Err(lost("anchored projection boundaries"));
@@ -1527,12 +1530,12 @@ fn body_mesh(st: &ModelState, name: &str, at: Vec3) -> Result<(usize, std::sync:
     if let Some(i) = st.bodies.iter().position(|b| b.name == name)
         && let Some(b) = st.bodies.get(i)
     {
-        return Ok((i, b.mesh()));
+        return Ok((i, b.display_mesh()));
     }
     let mut best: Option<(usize, f64)> = None;
     for (i, b) in st.bodies.iter().enumerate() {
-        let m = b.mesh();
-        if let Some((_, _, d)) = nearest_face(&m, at)
+        let d = b.body.nearest_face(at).map(|(d, _)| d).or_else(|| nearest_face(&b.display_mesh(), at).map(|(_, _, d)| d));
+        if let Some(d) = d
             && best.is_none_or(|(_, bd)| d < bd)
         {
             best = Some((i, d));
@@ -1540,7 +1543,7 @@ fn body_mesh(st: &ModelState, name: &str, at: Vec3) -> Result<(usize, std::sync:
     }
     let (i, _) = best.ok_or_else(|| DocError::Invalid(format!("body {name} no longer exists")))?;
     let b = st.bodies.get(i).ok_or_else(|| DocError::Invalid(format!("body {name} no longer exists")))?;
-    Ok((i, b.mesh()))
+    Ok((i, b.display_mesh()))
 }
 
 fn closest_on_segment(p: Vec3, a: Vec3, b: Vec3) -> Vec3 {
@@ -1926,9 +1929,25 @@ fn pcurve_levels(curve: &solidcore_record::brep::Curve2, lo: f64, hi: f64) -> Ve
 /// Nearest face: (B-rep face index, closest point, distance).
 pub(crate) fn nearest_face(m: &Mesh, p: Vec3) -> Option<(u32, Vec3, f64)> {
     let mut best: Option<(u32, Vec3, f64)> = None;
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
+    for (t, f) in m.tri_indices().iter().zip(&m.tri_face) {
         let Some([a, b, c]) = m.tri(t) else { continue };
-        let q = closest_on_triangle(p, a, b, c);
+        let q = {
+            let n = (b - a).cross(c - a);
+            match n.normalized() {
+                Some(nn) => {
+                    let proj = p - nn * (p - a).dot(nn);
+                    if (b - a).cross(proj - a).dot(n) >= 0.0 && (c - b).cross(proj - b).dot(n) >= 0.0 && (a - c).cross(proj - c).dot(n) >= 0.0 {
+                        proj
+                    } else {
+                        [closest_on_segment(p, a, b), closest_on_segment(p, b, c), closest_on_segment(p, c, a)]
+                            .into_iter()
+                            .min_by(|x, y| x.dist(p).total_cmp(&y.dist(p)))
+                            .unwrap_or(a)
+                    }
+                }
+                None => closest_on_segment(p, a, b),
+            }
+        };
         let d = q.dist(p);
         if best.is_none_or(|(_, _, bd)| d < bd) {
             best = Some((*f, q, d));
@@ -2274,7 +2293,7 @@ fn silhouette(plane: &Plane, m: &Mesh, body: Option<&solidcraft_kernel::Body>) -
         verts.len() - 1
     };
     let tris: Vec<([Vec3; 3], Vec3, Option<u32>, &[u32; 3])> = m
-        .triangles
+        .tri_indices()
         .iter()
         .enumerate()
         .filter_map(|(ti, t)| {
@@ -2547,7 +2566,7 @@ fn section_segments(plane: &Plane, m: &Mesh, face: Option<u32>) -> (Vec<(Vec2, V
             *e = None;
         }
     };
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
+    for (t, f) in m.tri_indices().iter().zip(&m.tri_face) {
         for k in t {
             let (Some(p), Some(n)) = (m.positions.get(*k as usize), m.normals.get(*k as usize)) else { continue };
             let Some(n) = n.normalized() else { continue };
@@ -2634,7 +2653,7 @@ fn section_segments(plane: &Plane, m: &Mesh, face: Option<u32>) -> (Vec<(Vec2, V
         Some(h(0.5 * (lo + hi)))
     };
     let mut segs: Vec<(Vec2, Vec2, u32)> = Vec::new();
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
+    for (t, f) in m.tri_indices().iter().zip(&m.tri_face) {
         if face.is_some_and(|x| x != *f) {
             continue;
         }

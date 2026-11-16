@@ -921,6 +921,62 @@ impl Body {
             .collect()
     }
 
+    /// Pairs of faces `(a, b)` that meet across a G1-tangent edge (normals within `cos_limit` at the
+    /// edge's midpoint).
+    pub fn tangent_edge_face_pairs(&self, cos_limit: f64) -> Vec<(u32, u32)> {
+        if self.is_mesh() {
+            return Vec::new();
+        }
+        let mut forward: Vec<Option<bool>> = vec![None; self.record.faces.len()];
+        for shell in &self.record.shells {
+            if let brep::Shell::Faces { faces, .. } = shell {
+                for f in faces {
+                    if let Some(slot) = forward.get_mut(f.face as usize) {
+                        slot.get_or_insert(f.forward);
+                    }
+                }
+            }
+        }
+        let evals: Vec<Option<(solidcraft_geom::brep::eval::SurfaceEval, f64)>> = self
+            .record
+            .faces
+            .iter()
+            .zip(forward)
+            .map(|(face, fwd)| {
+                let s = solidcraft_geom::brep::eval::SurfaceEval::new(face.parameters()).ok()?;
+                Some((s, if fwd? { 1.0 } else { -1.0 }))
+            })
+            .collect();
+        let mut out = Vec::new();
+        for (ei, edge) in self.record.edges.iter().enumerate() {
+            let [a, b] = edge.uses.as_slice() else { continue };
+            if a.face == b.face {
+                continue;
+            }
+            let [t0, t1] = edge.interval;
+            let t = 0.5 * (t0 + t1);
+            let normal_at = |u: &brep::EdgeUseRef| -> Option<Vec3> {
+                let (surf, side) = evals.get(u.face as usize)?.as_ref()?;
+                let brep::Loop::Edges { edges } = self.record.faces.get(u.face as usize)?.loops.get(u.r#loop as usize)? else {
+                    return None;
+                };
+                let used = edges.get(u.position as usize)?;
+                if used.edge as usize != ei {
+                    return None;
+                }
+                let uv = solidcore_ops::pcurve::eval(&used.pcurve, t)?;
+                let (_, su, sv) = surf.derivs(uv[0], uv[1])?;
+                su.cross(sv).normalized().map(|n| n * *side)
+            };
+            if let (Some(n1), Some(n2)) = (normal_at(a), normal_at(b))
+                && n1.dot(n2) > cos_limit
+            {
+                out.push((a.face, b.face));
+            }
+        }
+        out
+    }
+
     /// Exact polyline samples for each non-seam edge bordering `face` of `self`.
     pub fn face_edge_polylines(&self, face: usize) -> Vec<Vec<Vec3>> {
         if self.is_mesh() {
@@ -949,6 +1005,11 @@ impl Body {
         let reach = self.size().max(1.0) * 100.0;
         let dists = ops.face_distances_within(order, &[[p.x, p.y, p.z]], reach).ok()?;
         dists.into_iter().enumerate().filter_map(|(f, row)| Some((row.first().copied().flatten()?, f))).min_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// The display mesh of `self` at the given tolerance.
+    pub fn display_mesh_at(&self, t: &MeshTolerance) -> Result<Mesh> {
+        self.mesh_untimed(t)
     }
 
     /// Certify the two caps of a body built by [`crate::cylinder`]. Its wall stays uncertified.

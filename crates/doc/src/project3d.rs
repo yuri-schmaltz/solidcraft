@@ -15,9 +15,19 @@ fn part_of<'a>(st: &'a ModelState, src: &LinkSource) -> Option<(&'a crate::Model
     match src {
         LinkSource::Body { body } => Some((st.body(body)?, None)),
         LinkSource::Face { body, at } => {
-            let b = st.body(body).or_else(|| st.bodies.iter().min_by(|x, y| dist_to(&x.mesh(), *at).total_cmp(&dist_to(&y.mesh(), *at))))?;
-            let (f, _, _) = crate::project::nearest_face(&b.mesh(), *at)?;
-            Some((b, Some(smooth_patch(&b.body, usize::try_from(f).ok()?))))
+            let b = st.body(body).or_else(|| {
+                st.bodies.iter().min_by(|x, y| {
+                    let dx = x.body.nearest_face(*at).map(|(d, _)| d).unwrap_or_else(|| dist_to(&x.display_mesh(), *at));
+                    let dy = y.body.nearest_face(*at).map(|(d, _)| d).unwrap_or_else(|| dist_to(&y.display_mesh(), *at));
+                    dx.total_cmp(&dy)
+                })
+            })?;
+            let f = b
+                .body
+                .nearest_face(*at)
+                .map(|(_, f)| f)
+                .or_else(|| crate::project::nearest_face(&b.display_mesh(), *at).and_then(|(f, _, _)| usize::try_from(f).ok()))?;
+            Some((b, Some(smooth_patch(&b.body, f))))
         }
         _ => None,
     }
@@ -253,7 +263,7 @@ fn dist_to(m: &Mesh, p: Vec3) -> f64 {
 }
 
 fn tris(m: &Mesh, face: Option<u32>) -> Vec<[Vec3; 3]> {
-    m.triangles.iter().zip(&m.tri_face).filter(|(_, f)| face.is_none_or(|x| x == **f)).filter_map(|(t, _)| m.tri(t)).collect()
+    m.tri_indices().iter().zip(&m.tri_face).filter(|(_, f)| face.is_none_or(|x| x == **f)).filter_map(|(t, _)| m.tri(t)).collect()
 }
 
 /// Ray–triangle hit parameter (Möller–Trumbore), any sign.
@@ -478,7 +488,7 @@ pub(crate) fn spun_outline(m: &Mesh, origin: Vec3, dir: Vec3, plane: &Plane) -> 
     for i in 0..=n {
         let t = t0 + (t1 - t0) * i as f64 / n as f64;
         let mut r = f64::NEG_INFINITY;
-        for tri in &m.triangles {
+        for tri in m.tri_indices() {
             let Some(p) = m.tri(tri) else { continue };
             for (a, b) in [(p[0], p[1]), (p[1], p[2]), (p[2], p[0])] {
                 let (ha, hb) = (ax(a) - t, ax(b) - t);
@@ -503,7 +513,7 @@ pub(crate) fn spun_outline(m: &Mesh, origin: Vec3, dir: Vec3, plane: &Plane) -> 
 /// direction `"x,y,z"` cuts along it.
 pub(crate) fn iso_curve(m: &Mesh, f: u32, p: Vec3, dir: &str) -> Vec<Vec<Vec3>> {
     let ns: Vec<Vec3> = m
-        .triangles
+        .tri_indices()
         .iter()
         .zip(&m.tri_face)
         .filter(|(_, x)| **x == f)
@@ -513,7 +523,7 @@ pub(crate) fn iso_curve(m: &Mesh, f: u32, p: Vec3, dir: &str) -> Vec<Vec<Vec3>> 
     let Some(n0) = crate::project::nearest_face(m, p).and_then(|_| ns.first().copied()) else { return Vec::new() };
     // Normal at p: of the nearest triangle of the face.
     let np = m
-        .triangles
+        .tri_indices()
         .iter()
         .zip(&m.tri_face)
         .filter(|(_, x)| **x == f)

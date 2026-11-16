@@ -180,6 +180,11 @@ impl ModelBody {
             self.mesh_placement = PlacedMesh::new(old, transform).map(Arc::new);
         }
     }
+
+    /// Cached display tessellation of this body.
+    pub fn display_mesh(&self) -> Arc<Mesh> {
+        self.mesh()
+    }
 }
 
 /// The display plan of a definition `body` at quality `q`, made once in `cell`.

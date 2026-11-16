@@ -5297,22 +5297,15 @@ fn separate_touching(state: &mut ModelState, name: &str) -> Result<Option<KeptSe
 /// within the larger of their record tolerances. A distance only the meshes give is not trusted
 /// to say they touch.
 fn unrecorded_touches(pieces: &[Body], touches: &[Vec<usize>]) -> Result<Vec<[usize; 2]>> {
-    let meshes = pieces
-        .iter()
-        .map(|p| {
-            let chord = (p.size() * 1e-4).max(1e-6);
-            Ok((p.mesh(&kernel::MeshTolerance::chord(chord))?, chord))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let shapes: Vec<kernel::DistanceShape> = pieces.iter().zip(&meshes).map(|(p, (m, chord))| kernel::DistanceShape::new(p, m, *chord)).collect();
     let mut out = Vec::new();
-    for (a, (sa, pa)) in shapes.iter().zip(pieces).enumerate() {
-        for (b, (sb, pb)) in shapes.iter().zip(pieces).enumerate().skip(a + 1) {
-            if touches.get(a).is_some_and(|t| t.contains(&b)) || !sa.bounds().meets(&sb.bounds()) {
+    for (a, pa) in pieces.iter().enumerate() {
+        let ba = pa.outline_bounds();
+        for (b, pb) in pieces.iter().enumerate().skip(a + 1) {
+            let tol = pa.record().tolerance.max(pb.record().tolerance);
+            if touches.get(a).is_some_and(|t| t.contains(&b)) || !ba.inflated(tol).meets(&pb.outline_bounds()) {
                 continue;
             }
-            let tol = pa.record().tolerance.max(pb.record().tolerance);
-            if kernel::body_distance(sa, sb, tol)?.is_some_and(|d| d.exact && d.distance <= tol) {
+            if pa.meets(pb).unwrap_or(false) {
                 out.push([a, b]);
             }
         }
@@ -5651,7 +5644,7 @@ pub fn edge_refs(st: &ModelState, body: &Option<crate::BodyName>, pts: &[Vec3]) 
         let found = seen.entry(ti).or_insert_with(|| {
             let mb = st.bodies.get(ti)?;
             let size = mb.body.size();
-            Some((mb.body.edges((size * 1e-3).max(1e-3)).ok()?, mb.mesh().bounds()))
+            Some((mb.body.edges((size * 1e-3).max(1e-3)).ok()?, mb.outline_bounds()))
         });
         let Some((edges, bb)) = found else { return Vec::new() };
         let e = edges.iter().min_by(|x, y| {
@@ -5722,7 +5715,7 @@ fn resolve_edges(b: &Body, pts: &[Vec3], refs: &[EdgeRef], warning: &mut Option<
     let edges = b.edges((size * 1e-3).max(1e-3))?;
     let tight = (size * 2e-3).max(1e-3);
     let dist = |p: Vec3, e: &kernel::EdgeInfo| e.points.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min);
-    let now = b.mesh(&solidcraft_kernel::MeshTolerance::chord((size * 1e-2).max(1e-2))).map(|m| m.bounds()).ok();
+    let now = b.exact_bounds().ok();
     let (mut out, mut moved, mut lost) = (Vec::new(), 0, 0);
     for (i, p) in pts.iter().enumerate() {
         let on = edges.iter().any(|e| dist(*p, e) <= tight);
@@ -5940,7 +5933,7 @@ fn blend_edges_on(mb: &ModelBody, f: &Feature, edges: &[crate::Position], idx: &
         }
         // The body changed since the pick: the pick may now sit at an end of the edge.
         let moved = f.edge_refs.get(i).is_some_and(|r| {
-            let now = mb.mesh().bounds();
+            let now = mb.outline_bounds();
             let tight = (mb.body.size() * 2e-3).max(1e-3);
             now.min.dist(r.min) > tight || now.max.dist(r.max) > tight
         });
@@ -7465,8 +7458,14 @@ fn feature_tools_with_constructor(
             if let Some(bi) = curved
                 && let Some(tb) = tst.bodies.get(bi)
             {
-                let m = tb.mesh();
-                let hs: Vec<f64> = m.positions.iter().map(|q| (*q - ss.plane.origin).dot(n) - off).collect();
+                let hs: Vec<f64> = tb
+                    .body
+                    .edge_faces_and_points()
+                    .into_iter()
+                    .flat_map(|(_, pts)| pts)
+                    .chain((0..tb.body.face_count()).filter_map(|f| tb.body.face_internal_point(f)))
+                    .map(|q| (q - ss.plane.origin).dot(n) - off)
+                    .collect();
                 let margin = tb.body.size() * 0.05 + 1.0 + to_offset.abs();
                 if hi > 0.0 {
                     hi = hs.iter().cloned().fold(hi, f64::max) + margin;
@@ -7639,7 +7638,14 @@ fn feature_tools_with_constructor(
                     let a = angle_axis.dot(u0.cross(v)).atan2(u0.dot(v));
                     if a < 0.0 { a + std::f64::consts::TAU } else { a }
                 };
-                let far = tb.mesh().positions.iter().map(|q| angle_of(*q)).fold(0.0, f64::max);
+                let far = tb
+                    .body
+                    .edge_faces_and_points()
+                    .into_iter()
+                    .flat_map(|(_, pts)| pts)
+                    .chain((0..tb.body.face_count()).filter_map(|f| tb.body.face_internal_point(f)))
+                    .map(angle_of)
+                    .fold(0.0, f64::max);
                 let sweep = (far + 0.05).min(std::f64::consts::TAU - 1e-3);
                 let bodies = kernel::revolve(&ss.plane, regions, o, d, sweep)?;
                 let tools = regions.iter().zip(bodies).map(|(r, body)| tool(r, body, None)).collect();
@@ -9702,9 +9708,11 @@ fn trim_to_body(tools: Vec<Traced>, target: &ModelBody, dist_to_start: impl Fn(V
         for (lump, lineage) in lumps.into_iter().zip(lineages) {
             let tol = (lump.size() * 1e-4).max(1e-6);
             let touches = lump
-                .mesh(&solidcraft_kernel::MeshTolerance::chord((lump.size() * 1e-2).max(1e-2)))
-                .map(|m| m.positions.iter().any(|q| dist_to_start(*q) < tol))
-                .unwrap_or(false);
+                .edge_faces_and_points()
+                .into_iter()
+                .flat_map(|(_, pts)| pts)
+                .chain((0..lump.face_count()).filter_map(|f| lump.face_internal_point(f)))
+                .any(|q| dist_to_start(q) < tol);
             if touches {
                 out.push(Traced { body: lump, lineage, recipe: None });
             }
@@ -9908,21 +9916,9 @@ fn face_samples(b: &ModelBody) -> Vec<Vec3> {
 /// Each face appears once, with a point on it. Shell evaluation and selection feedback use
 /// the same expansion; callers keep the original picks when saving the feature.
 pub fn tangent_face_chain(b: &ModelBody, picks: &[Vec3]) -> Vec<(usize, Vec3)> {
-    let m = b.mesh();
     let samples = face_samples(b);
     let face_of = |p: Vec3| crate::appearance::face_index_at(b, p);
-    // The surface normal of face f at its mesh vertex nearest q (vertex normals are the
-    // surface's, so a tangent edge reads the same from both sides).
-    let normal_near = |f: u32, q: Vec3| -> Option<Vec3> {
-        m.triangles
-            .iter()
-            .zip(&m.tri_face)
-            .filter(|(_, tf)| **tf == f)
-            .flat_map(|(t, _)| t.iter().copied())
-            .filter_map(|i| Some((m.positions.get(i as usize)?.dist(q), *m.normals.get(i as usize)?)))
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .and_then(|(_, n)| n.normalized())
-    };
+    let pairs = b.body.tangent_edge_face_pairs(solidcraft_geom::TANGENT_CHAIN.cos());
     let mut chosen: Vec<u32> = picks.iter().filter_map(|p| face_of(*p).map(|f| f as u32)).collect();
     chosen.sort_unstable();
     chosen.dedup();
@@ -9930,8 +9926,7 @@ pub fn tangent_face_chain(b: &ModelBody, picks: &[Vec3]) -> Vec<(usize, Vec3)> {
     while k < chosen.len() && chosen.len() < 10_000 {
         let f = chosen[k];
         k += 1;
-        for (e, fs) in m.edges.iter().zip(&m.edge_faces) {
-            let (Some(&a), Some(&bb)) = (fs.first(), fs.get(1)) else { continue };
+        for &(a, bb) in &pairs {
             let other = if a == f {
                 bb
             } else if bb == f {
@@ -9939,13 +9934,7 @@ pub fn tangent_face_chain(b: &ModelBody, picks: &[Vec3]) -> Vec<(usize, Vec3)> {
             } else {
                 continue;
             };
-            if chosen.contains(&other) {
-                continue;
-            }
-            let Some(mid) = e.get(e.len() / 2).copied() else { continue };
-            if let (Some(n1), Some(n2)) = (normal_near(f, mid), normal_near(other, mid))
-                && n1.dot(n2) > solidcraft_geom::TANGENT_CHAIN.cos()
-            {
+            if !chosen.contains(&other) {
                 chosen.push(other);
             }
         }
@@ -10510,7 +10499,7 @@ fn eval_feature_kind(
             let mut made = Vec::new();
             for p in cells {
                 // The cell: inside the tools that hold the point, outside the others.
-                let inside: Vec<bool> = tb.iter().map(|b| b.mesh().contains(p.0)).collect();
+                let inside: Vec<bool> = tb.iter().map(|b| b.body.contains(p.0)).collect();
                 let mut acc: Option<Traced> = None;
                 for (b, _) in tb.iter().zip(&inside).filter(|(_, i)| **i) {
                     acc = match acc {
@@ -10999,7 +10988,7 @@ fn eval_feature_kind(
             let (lo, hi) = (Vec3::new(side(0)?, side(2)?, side(4)?), Vec3::new(side(1)?, side(3)?, side(5)?));
             let mut bb = solidcraft_geom::Aabb3::EMPTY;
             for b in st.bodies.iter().filter(|b| bodies.is_empty() || bodies.iter().any(|t| *t == b.name)) {
-                bb = bb.union(&b.mesh().bounds());
+                bb = bb.union(&b.outline_bounds());
             }
             if bb.is_empty() {
                 return Err(DocError::Invalid("no bodies to bound".into()));

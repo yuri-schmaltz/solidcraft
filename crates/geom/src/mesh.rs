@@ -375,6 +375,9 @@ pub trait MeshGeom {
 
     /// An index for many `contains` queries on this mesh.
     fn inside_index(&self) -> InsideIndex<'_>;
+
+    /// Triangle indices as `[u32; 3]` slices.
+    fn tri_indices(&self) -> &[[u32; 3]];
 }
 
 impl MeshGeom for Mesh {
@@ -828,6 +831,10 @@ impl MeshGeom for Mesh {
             })
             .collect();
         InsideIndex { mesh: self, rays }
+    }
+
+    fn tri_indices(&self) -> &[[u32; 3]] {
+        &self.triangles
     }
 }
 
