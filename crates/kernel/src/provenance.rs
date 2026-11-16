@@ -188,24 +188,21 @@ fn nearest_segment(segs: &[Seg2], pts: &[Vec2]) -> Option<usize> {
 /// caps on the start and end planes, sides by the profile segment they sweep.
 pub fn extrude_origins(tool: &Body, plane: &Plane, regions: &[Region2]) -> Result<Vec<FaceOrigin>> {
     let size = tool.size().max(1e-9);
-    let m = tool.mesh(&crate::MeshTolerance::chord(size * 2e-4))?;
-    let faces = face_tris(&m);
+    let faces = tool.faces((size * 1e-3).max(1e-3))?;
     let n = plane.normal();
     let segs = segments(regions);
-    let heights: Vec<f64> = m.positions.iter().map(|p| (*p - plane.origin).dot(n)).collect();
-    let (lo, hi) = heights.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), h| (a.min(*h), b.max(*h)));
+    let (lo, hi) =
+        faces.iter().map(|f| (f.centroid - plane.origin).dot(n)).fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), h| (a.min(h), b.max(h)));
     let mut out = Vec::with_capacity(faces.len());
     for f in &faces {
-        let samples = face_samples(f);
-        let cap = samples.iter().all(|(_, fn_)| fn_.dot(n).abs() > 1.0 - 1e-6);
-        if cap {
-            let h = samples.first().map(|(p, _)| (*p - plane.origin).dot(n)).unwrap_or(lo);
+        if f.plane_normal.is_some_and(|fn_| fn_.dot(n).abs() > 1.0 - 1e-6) {
+            let h = (f.centroid - plane.origin).dot(n);
             // The start cap is the one at the low end along the plane's normal.
             out.push(FaceOrigin::Cap { end: (h - lo).abs() > (h - hi).abs() });
             continue;
         }
-        let pts: Vec<Vec2> = samples.iter().map(|(p, _)| plane.to_local(*p - n * (*p - plane.origin).dot(n))).collect();
-        match nearest_segment(&segs, &pts) {
+        let pt = plane.to_local(f.centroid - n * (f.centroid - plane.origin).dot(n));
+        match nearest_segment(&segs, &[pt]) {
             Some(k) => out.push(FaceOrigin::Profile { segment: k }),
             None => out.push(FaceOrigin::Cap { end: false }),
         }
@@ -218,8 +215,7 @@ pub fn extrude_origins(tool: &Body, plane: &Plane, regions: &[Region2]) -> Resul
 /// by the profile segment it turns.
 pub fn revolve_origins(tool: &Body, plane: &Plane, regions: &[Region2], axis_origin: Vec2, axis_dir: Vec2) -> Result<Vec<FaceOrigin>> {
     let size = tool.size().max(1e-9);
-    let m = tool.mesh(&crate::MeshTolerance::chord(size * 2e-4))?;
-    let faces = face_tris(&m);
+    let faces = tool.faces((size * 1e-3).max(1e-3))?;
     let segs = segments(regions);
     let o = plane.to_world(axis_origin);
     let a = plane.dir_to_world(axis_dir).normalized().ok_or_else(|| crate::KernelError::Invalid("axis".into()))?;
@@ -231,27 +227,22 @@ pub fn revolve_origins(tool: &Body, plane: &Plane, regions: &[Region2], axis_ori
     };
     let mut out = Vec::with_capacity(faces.len());
     for f in &faces {
-        let samples = face_samples(f);
         // An angle cap is planar and contains the axis.
-        let planar = samples.windows(2).all(|w| w[0].1.dot(w[1].1) > 1.0 - 1e-9);
-        let n0 = samples.first().map(|x| x.1).unwrap_or(Vec3::Z);
-        if planar && n0.dot(a).abs() < 1e-6 && samples.iter().all(|(p, _)| (*p - o).dot(n0).abs() < size * 1e-6) {
+        if let Some(n0) = f.plane_normal
+            && n0.dot(a).abs() < 1e-6
+            && (f.centroid - o).dot(n0).abs() < size * 1e-6
+        {
             // The start cap lies in the profile's plane.
-            let start = samples.iter().all(|(p, _)| plane.height(*p).abs() < size * 1e-6);
+            let start = plane.height(f.centroid).abs() < size * 1e-6;
             out.push(FaceOrigin::Cap { end: !start });
             continue;
         }
-        // Turn each sample back into the profile's half-plane.
-        let pts: Vec<Vec2> = samples
-            .iter()
-            .map(|(p, _)| {
-                let w = *p - o;
-                let h = w.dot(a);
-                let r = (w - a * h).len();
-                plane.to_local(o + a * h + side * r)
-            })
-            .collect();
-        match nearest_segment(&segs, &pts) {
+        // Turn the face centroid back into the profile's half-plane.
+        let w = f.centroid - o;
+        let h = w.dot(a);
+        let r = (w - a * h).len();
+        let pt = plane.to_local(o + a * h + side * r);
+        match nearest_segment(&segs, &[pt]) {
             Some(k) => out.push(FaceOrigin::Profile { segment: k }),
             None => out.push(FaceOrigin::Cap { end: false }),
         }
@@ -263,19 +254,15 @@ pub fn revolve_origins(tool: &Body, plane: &Plane, regions: &[Region2], axis_ori
 /// edge indices in `input`'s mesh order): each blend face comes from the edge it lies along.
 pub fn blend_origins(result: &Body, input: &Body, edges: &[usize], prov: &mut History) -> Result<()> {
     let size = input.size().max(1e-9);
-    let rm = result.mesh(&crate::MeshTolerance::chord(size * 2e-4))?;
-    let im = input.mesh(&crate::MeshTolerance::chord(size * 2e-4))?;
-    let rfaces = face_tris(&rm);
+    let rfaces = result.faces((size * 1e-3).max(1e-3))?;
     for (fi, fp) in prov.faces.iter_mut().enumerate() {
         if fp.change != Change::Generated {
             continue;
         }
         let Some(rf) = rfaces.get(fi) else { continue };
-        let samples = face_samples(rf);
         let mean = |e: usize| {
-            let Some(pts) = im.edges.get(e) else { return f64::INFINITY };
-            samples.iter().map(|(p, _)| pts.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min)).sum::<f64>()
-                / samples.len().max(1) as f64
+            let Some(pts) = input.edge_points(e) else { return f64::INFINITY };
+            pts.windows(2).map(|w| rf.centroid.dist_to_segment(w[0], w[1])).fold(f64::INFINITY, f64::min)
         };
         if let Some(e) = edges.iter().copied().min_by(|a, b| mean(*a).total_cmp(&mean(*b))) {
             fp.origins = vec![FaceOrigin::Edge { operand: 0, edge: e }];
@@ -289,19 +276,26 @@ pub fn blend_origins(result: &Body, input: &Body, edges: &[usize], prov: &mut Hi
 /// comes from that face ([`FaceOrigin::Offset`]).
 pub fn offset_origins(result: &Body, input: &Body, thickness: f64, prov: &mut History) -> Result<()> {
     let size = input.size().max(1e-9);
-    let tol = size * 4e-4;
-    let rm = result.mesh(&crate::MeshTolerance::chord(size * 2e-4))?;
-    let im = input.mesh(&crate::MeshTolerance::chord(size * 2e-4))?;
-    let rfaces = face_tris(&rm);
-    let ifaces = face_tris(&im);
+    let tol = (size * 1e-3).max(1e-3);
+    let rfaces = result.faces(tol)?;
+    let Some((ops, order)) = input.ops_body() else {
+        return Ok(());
+    };
     for (fi, fp) in prov.faces.iter_mut().enumerate() {
         if fp.change != Change::Generated {
             continue;
         }
         let Some(rf) = rfaces.get(fi) else { continue };
-        let samples = face_samples(rf);
-        // Inner walls face into the cavity: their normal points back toward the input face.
-        let found = ifaces.iter().position(|f| samples.iter().all(|(p, n)| on_face(f, *p - *n * thickness, *n, tol)));
+        let Some(n) = rf.plane_normal else { continue };
+        let q = rf.centroid - n * thickness;
+        let Ok(dists) = ops.face_distances_within(order, &[[q.x, q.y, q.z]], tol) else { continue };
+        let found = dists
+            .into_iter()
+            .enumerate()
+            .filter_map(|(f, row)| Some((row.first().copied().flatten()?, f)))
+            .filter(|(d, _)| *d <= tol)
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|(_, f)| f);
         if let Some(face) = found {
             fp.origins = vec![FaceOrigin::Offset { operand: 0, face }];
         }
@@ -317,24 +311,21 @@ pub fn offset_origins(result: &Body, input: &Body, thickness: f64, prov: &mut Hi
 /// which only the tool's own history names ([`sweep_origins`]).
 pub fn swept_origins(tool: &Body, plane: &Plane, regions: &[Region2]) -> Result<Vec<FaceOrigin>> {
     let size = tool.size().max(1e-9);
-    let m = tool.mesh(&crate::MeshTolerance::chord(size * 2e-4))?;
-    let faces = face_tris(&m);
+    let faces = tool.faces((size * 1e-3).max(1e-3))?;
     let segs = segments(regions);
     let flat = |p: Vec3| plane.height(p).abs() <= size * 1e-6;
     let mut out = Vec::with_capacity(faces.len());
     for (fi, f) in faces.iter().enumerate() {
-        if f.tris.iter().all(|(t, _)| t.iter().all(|p| flat(*p))) {
+        if f.plane_normal.is_some() && flat(f.centroid) {
             out.push(FaceOrigin::Cap { end: false });
             continue;
         }
         // Its edges in the profile's plane, as 2D points.
-        let pts: Vec<Vec2> = m
-            .edges
-            .iter()
-            .zip(&m.edge_faces)
-            .filter(|(_, fs)| fs.contains(&(fi as u32)))
-            .filter(|(e, _)| e.len() >= 2 && e.iter().all(|p| flat(*p)))
-            .flat_map(|(e, _)| e.windows(2).map(|w| plane.to_local((w[0] + w[1]) * 0.5)).collect::<Vec<_>>())
+        let pts: Vec<Vec2> = tool
+            .face_edge_polylines(fi)
+            .into_iter()
+            .filter(|e| e.len() >= 2 && e.iter().all(|p| flat(*p)))
+            .flat_map(|e| e.windows(2).map(|w| plane.to_local((w[0] + w[1]) * 0.5)).collect::<Vec<_>>())
             .collect();
         match (pts.is_empty(), nearest_segment(&segs, &pts)) {
             (false, Some(k)) => out.push(FaceOrigin::Profile { segment: k }),
