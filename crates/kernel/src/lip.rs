@@ -60,24 +60,7 @@ impl Piece {
 
 /// The planar face of `body` at `at`: its index and outward normal.
 fn face_at(body: &Body, rec: &Brep, at: Vec3) -> Result<(usize, Vec3)> {
-    let size = body.size();
-    let mesh = body.mesh(&crate::MeshTolerance::chord((size * 1e-3).max(1e-3)))?;
-    let near = mesh
-        .triangles
-        .iter()
-        .zip(&mesh.tri_face)
-        .filter_map(|(t, f)| {
-            let [a, b, c] = mesh.tri(t)?;
-            let n = (b - a).cross(c - a).normalized()?;
-            let q = at - n * (at - a).dot(n);
-            let inside = [(a, b), (b, c), (c, a)].iter().all(|(u, v)| (*v - *u).cross(q - *u).dot(n) >= -1e-9);
-            inside.then_some(((at - a).dot(n).abs(), *f as usize))
-        })
-        .min_by(|x, y| x.0.total_cmp(&y.0));
-    let (d, f) = near.ok_or_else(|| fail("no face there"))?;
-    if d > size * 1e-3 {
-        return Err(fail("no face there"));
-    }
+    let f = body.face_at(at, body.size() * 1e-3).ok_or_else(|| fail("no face there"))?;
     match surf_of(rec, f) {
         Some(Surf::Plane { n, .. }) => Ok((f, n)),
         _ => Err(fail("the face must be planar")),
