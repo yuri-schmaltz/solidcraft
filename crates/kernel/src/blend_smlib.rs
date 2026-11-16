@@ -151,11 +151,11 @@ mod imp {
             return Err(KernelError::Invalid("edge picks must be finite points".into()));
         }
         let chord = (body.size() * 2e-3).max(1e-3);
-        let mesh = body.mesh(&crate::MeshTolerance::chord(chord))?;
-        let seams = crate::topo::seam_flags(body, &mesh);
-        let (smooth, _) = crate::smooth_edges::flags(body, &mesh);
-        let hidden: Vec<bool> =
-            (0..mesh.edges.len()).map(|i| seams.get(i).copied().unwrap_or(false) || smooth.get(i).copied().unwrap_or(false)).collect();
+        let edge_count = body.edge_count();
+        let edge_lines: Vec<Vec<Vec3>> = (0..edge_count).map(|i| body.edge_points(i).unwrap_or_default()).collect();
+        let seams = crate::topo::seam_flags_brep(body);
+        let (smooth, _) = crate::smooth_edges::flags_brep(body);
+        let hidden: Vec<bool> = (0..edge_count).map(|i| seams.get(i).copied().unwrap_or(false) || smooth.get(i).copied().unwrap_or(false)).collect();
         let reach = pick_tolerance(body);
         let tie = (body.size() * 1e-6).max(1e-6);
         let mut out = Picked { edges: Vec::with_capacity(picks.len()), points: Vec::with_capacity(picks.len()), hidden: Vec::new() };
@@ -165,7 +165,7 @@ mod imp {
             let polyline = |line: &[Vec3]| {
                 line.windows(2).filter_map(|w| if let [a, b] = w { Some(p.dist_to_segment(*a, *b)) } else { None }).fold(f64::INFINITY, f64::min)
             };
-            let near: Vec<f64> = mesh.edges.iter().map(|line| polyline(line)).collect();
+            let near: Vec<f64> = edge_lines.iter().map(|line| polyline(line)).collect();
             let nearest = near.iter().copied().fold(f64::INFINITY, f64::min);
             // The nearest edge, and the nearest that is no seam.
             let (mut any, mut edge): (Option<(f64, usize)>, Option<(f64, usize)>) = (None, None);
@@ -185,7 +185,7 @@ mod imp {
             let Some((_, i)) = chosen.filter(|(d, _)| *d <= reach) else {
                 return Err(KernelError::Invalid(format!("no edge near the pick at ({:.3}, {:.3}, {:.3})", p.x, p.y, p.z)));
             };
-            let (mid, _) = crate::body::polyline_mid(mesh.edges.get(i).map(Vec::as_slice).unwrap_or(&[]));
+            let (mid, _) = crate::body::polyline_mid(edge_lines.get(i).map(Vec::as_slice).unwrap_or(&[]));
             out.edges.push(i);
             out.points.push([mid.x, mid.y, mid.z]);
         }
@@ -297,13 +297,12 @@ mod imp {
     /// edges as `turn` says.
     fn reblend(body: &Body, what: &str, later: &crate::blend_corner::Later, turn: Turn) -> Result<(Body, Vec<bool>)> {
         let base = &later.base;
-        let mesh = base.mesh(&crate::MeshTolerance::chord((base.size() * 2e-3).max(1e-3)))?;
         let mut indices = Vec::with_capacity(later.edges.len());
         let mut points = Vec::with_capacity(later.edges.len());
         let mut radii = Vec::with_capacity(later.edges.len());
         for (e, r) in &later.edges {
-            let line = mesh.edges.get(*e).ok_or_else(|| failed(what, "corner", "an earlier round's edge is not in the body it was made on"))?;
-            let (mid, _) = crate::body::polyline_mid(line);
+            let line = base.edge_points(*e).ok_or_else(|| failed(what, "corner", "an earlier round's edge is not in the body it was made on"))?;
+            let (mid, _) = crate::body::polyline_mid(&line);
             indices.push(*e);
             points.push([mid.x, mid.y, mid.z]);
             radii.push(*r);
@@ -382,18 +381,21 @@ mod imp {
         Ok(super::OpenCorners { sheet, holes })
     }
 
-    /// The body's vertex nearest each point, within the pick tolerance: the ends of its edges.
+    /// The body's vertex nearest each point, within the pick tolerance.
     fn corner_vertices(body: &Body, picks: impl Iterator<Item = Vec3>) -> Result<Vec<[f64; 3]>> {
-        let mesh = body.mesh(&crate::MeshTolerance::chord((body.size() * 2e-3).max(1e-3)))?;
-        let ends: Vec<Vec3> = mesh.edges.iter().flat_map(|l| l.first().into_iter().chain(l.last())).copied().collect();
         let reach = pick_tolerance(body);
+        let verts = &body.record().vertices;
         picks
             .map(|p| {
-                ends.iter()
-                    .map(|v| (v.dist(p), *v))
+                verts
+                    .iter()
+                    .map(|v| {
+                        let q = Vec3::new(v.point[0], v.point[1], v.point[2]);
+                        (q.dist(p), v.point)
+                    })
                     .filter(|(d, _)| *d <= reach)
                     .min_by(|a, b| a.0.total_cmp(&b.0))
-                    .map(|(_, v)| [v.x, v.y, v.z])
+                    .map(|(_, v)| v)
                     .ok_or_else(|| KernelError::Invalid(format!("no corner near the setback point ({:.3}, {:.3}, {:.3})", p.x, p.y, p.z)))
             })
             .collect()

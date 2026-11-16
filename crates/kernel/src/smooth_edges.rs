@@ -79,6 +79,10 @@ pub(crate) fn flags(body: &Body, mesh: &Mesh) -> (Vec<bool>, Vec<bool>) {
     crate::guard("smooth display edges", || Ok(classify(body, mesh, WORK))).unwrap_or_default()
 }
 
+pub(crate) fn flags_brep(body: &Body) -> (Vec<bool>, Vec<bool>) {
+    crate::guard("smooth brep edges", || Ok(classify_brep(body, WORK))).unwrap_or_default()
+}
+
 /// A face ready to evaluate: its surface and the sign that turns the natural normal outward.
 struct FaceEval {
     surface: SurfaceEval,
@@ -241,9 +245,34 @@ fn same_faces(record: &Brep, mesh: &Mesh, e: usize) -> bool {
     used == listed
 }
 
-fn classify(body: &Body, mesh: &Mesh, mut work: usize) -> (Vec<bool>, Vec<bool>) {
+fn classify(body: &Body, mesh: &Mesh, work: usize) -> (Vec<bool>, Vec<bool>) {
     let Ok(rec) = crate::native::brep_record(body) else { return (Vec::new(), Vec::new()) };
-    if rec.faces.len() > MAX_FACES || mesh.edges.len() > MAX_EDGES {
+    classify_edges(
+        body,
+        &rec,
+        mesh.edges.len(),
+        |i| {
+            let line = mesh.edges.get(i)?.as_slice();
+            Some((line, same_faces(&rec, mesh, i)))
+        },
+        work,
+    )
+}
+
+fn classify_brep(body: &Body, work: usize) -> (Vec<bool>, Vec<bool>) {
+    let Ok(rec) = crate::native::brep_record(body) else { return (Vec::new(), Vec::new()) };
+    let polylines: Vec<Vec<Vec3>> = (0..rec.edges.len()).map(|i| body.edge_points(i).unwrap_or_default()).collect();
+    classify_edges(body, &rec, rec.edges.len(), |i| polylines.get(i).map(|line| (line.as_slice(), true)), work)
+}
+
+fn classify_edges<'a>(
+    body: &Body,
+    rec: &Brep,
+    edge_count: usize,
+    edge_at: impl Fn(usize) -> Option<(&'a [Vec3], bool)>,
+    mut work: usize,
+) -> (Vec<bool>, Vec<bool>) {
+    if rec.faces.len() > MAX_FACES || edge_count > MAX_EDGES {
         return (Vec::new(), Vec::new());
     }
     let mut split_points = 0usize;
@@ -253,25 +282,25 @@ fn classify(body: &Body, mesh: &Mesh, mut work: usize) -> (Vec<bool>, Vec<bool>)
         let Some(total) = split_points.checked_add(line.len()) else { return (Vec::new(), Vec::new()) };
         split_points = total;
     }
-    let faces = face_evals(&rec);
-    let mut smooth = vec![false; mesh.edges.len()];
-    let mut sharp = vec![false; mesh.edges.len()];
+    let faces = face_evals(rec);
+    let mut smooth = vec![false; edge_count];
+    let mut sharp = vec![false; edge_count];
     // Edges of one join: the measured edges between the same faces that continue each other.
     let mut joins: Vec<usize> = Vec::new();
-    // The mesh's edges are the record's, in its order.
-    for (current, line) in mesh.edges.iter().enumerate().take(rec.edges.len()) {
+    for current in 0..edge_count.min(rec.edges.len()) {
+        let Some((line, same)) = edge_at(current) else { continue };
         let Some(split_work) = line.len().checked_add(1).and_then(|n| n.checked_mul(split_points)) else { break };
         let Some(left) = work.checked_sub(split_work) else { break };
         work = left;
         let flag = if crate::heal::on_split_line(line, body.split_keep()) {
             sharp.get_mut(current)
-        } else if !same_faces(&rec, mesh, current) {
+        } else if !same {
             None
         } else {
             joins.push(current);
             let length: f64 = line.windows(2).map(|w| if let [a, b] = w { a.dist(*b) } else { 0. }).sum();
             let Join { smooth: tangent, crease } =
-                if length > 0. && length.is_finite() { join(&rec, &faces, current, length, &mut work) } else { Join::default() };
+                if length > 0. && length.is_finite() { join(rec, &faces, current, length, &mut work) } else { Join::default() };
             if let (true, Some(flag)) = (tangent, smooth.get_mut(current)) {
                 *flag = true;
             }
@@ -284,7 +313,7 @@ fn classify(body: &Body, mesh: &Mesh, mut work: usize) -> (Vec<bool>, Vec<bool>)
             break;
         }
     }
-    whole_joins(&rec, &joins, &mut smooth, work);
+    whole_joins(rec, &joins, &mut smooth, work);
     (smooth, sharp)
 }
 

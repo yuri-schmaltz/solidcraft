@@ -108,6 +108,10 @@ fn is_seam(faces: &Faces, e: &Edge, fs: &[usize]) -> bool {
 /// or where one face of it meets itself (a whole turn of a cylinder, its seam used twice)?
 /// `mesh` is the body's tessellation, whose edges are the record's.
 pub fn seam_flags(b: &Body, _mesh: &Mesh) -> Vec<bool> {
+    seam_flags_brep(b)
+}
+
+pub(crate) fn seam_flags_brep(b: &Body) -> Vec<bool> {
     let record = b.record();
     let faces = Faces::new(record, surface_tol(b));
     record.edges.iter().zip(edge_faces(record)).map(|(e, fs)| is_seam(&faces, e, &fs)).collect()
