@@ -251,13 +251,7 @@ pub(super) fn rib_tools(vals: &BTreeMap<String, Value>, st: &ModelState, f: &Fea
 fn planar_normal_at(b: &Body, p: Vec3) -> Option<Vec3> {
     let tol = (b.size() * 2e-3).max(1e-3);
     let faces = b.faces(tol).ok()?;
-    let mesh = b.mesh(&solidcraft_kernel::MeshTolerance::chord(tol)).ok()?;
-    let mut near = vec![f64::INFINITY; faces.len()];
-    for (t, f) in mesh.triangles.iter().zip(&mesh.tri_face) {
-        if let (Some([u, v, w]), Some(d)) = (mesh.tri(t), near.get_mut(*f as usize)) {
-            *d = d.min(crate::appearance::closest_on_triangle(p, u, v, w).dist(p));
-        }
-    }
+    let near = b.face_distances(p);
     faces
         .iter()
         .filter_map(|f| f.plane_normal.map(|n| (n, ((p - f.centroid).dot(n)).abs(), near.get(f.index).copied().unwrap_or(f64::INFINITY))))
@@ -2405,7 +2399,7 @@ fn body_under(st: &ModelState, body: &Option<crate::BodyName>, p: Vec3) -> Resul
     let i = body_at(st, body, &[p])?;
     let b = st.bodies.get(i).ok_or_else(|| DocError::Invalid("there is no body".into()))?;
     let tolerance = (b.body.size() * 1e-5).max(1e-4);
-    if crate::project::nearest_face(&b.mesh(), p).is_none_or(|(_, _, distance)| distance > tolerance) {
+    if b.body.nearest_face(p).is_none_or(|(distance, _)| distance > tolerance) {
         return Err(DocError::Invalid("the plastic feature's placement is no longer on its body face".into()));
     }
     Ok(b.name.clone())

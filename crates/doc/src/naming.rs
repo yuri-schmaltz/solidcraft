@@ -277,7 +277,7 @@ impl FaceIndex {
 }
 
 fn face_count(b: &ModelBody) -> usize {
-    b.mesh().tri_face.iter().map(|f| *f as usize + 1).max().unwrap_or(0)
+    b.body.face_count()
 }
 
 /// Names of a body's faces (by B-rep face index).
@@ -931,7 +931,8 @@ pub(crate) fn along_spread(cs: Vec<(usize, Vec3)>) -> Vec<usize> {
 
 /// Each face's centre: the mean of the sampled centres of its triangles.
 pub(crate) fn face_centres(b: &ModelBody) -> Vec<Vec3> {
-    samples(&b.mesh(), face_count(b)).into_iter().map(|ps| ps.iter().fold(Vec3::ZERO, |a, p| a + *p) * (1.0 / ps.len().max(1) as f64)).collect()
+    let tol = (b.body.size() * 1e-3).max(1e-3);
+    b.body.faces(tol).map(|fs| fs.into_iter().map(|f| f.centroid).collect()).unwrap_or_default()
 }
 
 /// The name of a face new to `f` (a feature that went through `eval::naming_feature`).
@@ -1122,17 +1123,16 @@ pub fn edge_names(b: &ModelBody) -> Vec<String> {
 
 /// Names of a body's edges from its faces' names `faces`.
 fn edge_names_from(b: &ModelBody, faces: &[String]) -> Vec<String> {
-    let m = b.mesh();
-    let mut names: Vec<String> = m
-        .edge_faces
+    let edges = b.body.edge_faces_and_points();
+    let mut names: Vec<String> = edges
         .iter()
-        .map(|fs| {
+        .map(|(fs, _)| {
             let mut n: Vec<&str> = fs.iter().filter_map(|f| faces.get(*f as usize).map(String::as_str)).collect();
             n.sort();
             n.join("|")
         })
         .collect();
-    let pts: Vec<Vec<Vec3>> = m.edges.clone();
+    let pts: Vec<Vec<Vec3>> = edges.into_iter().map(|(_, p)| p).collect();
     number_pieces(&mut names, &pts, '~');
     names
 }
@@ -1145,19 +1145,8 @@ pub fn find_edge(b: &ModelBody, name: &str, near: Vec3) -> Result<Vec3, String> 
 
 /// Names of the edges nearest each point on a body (for storing references).
 pub fn edge_names_at(b: &ModelBody, pts: &[Vec3]) -> Vec<String> {
-    let m = b.mesh();
     let names = edge_names(b);
-    pts.iter()
-        .map(|p| {
-            m.edges
-                .iter()
-                .enumerate()
-                .map(|(i, e)| (e.windows(2).map(|w| p.dist_to_segment(w[0], w[1])).fold(f64::MAX, f64::min), i))
-                .min_by(|a, b| a.0.total_cmp(&b.0))
-                .and_then(|(_, i)| names.get(i).cloned())
-                .unwrap_or_default()
-        })
-        .collect()
+    pts.iter().map(|p| b.body.edge_at(*p).and_then(|i| names.get(i).cloned()).unwrap_or_default()).collect()
 }
 
 /// Incident face indices (sorted, deduplicated) for each B-rep vertex in `record`.
@@ -1243,8 +1232,7 @@ pub fn face_names_at(st: &ModelState, pts: &[Vec3]) -> Vec<String> {
         .map(|p| {
             for b in st.bodies.iter().filter(|b| !b.body.is_mesh()) {
                 let tol = (b.body.size() * 1e-3).max(1e-3);
-                let idx = FaceIndex::new(&b.mesh(), face_count(b));
-                if let Some(f) = idx.face_at(*p, tol) {
+                if let Some(f) = b.body.face_at(*p, tol) {
                     return face_names(b).get(f).cloned().unwrap_or_default();
                 }
             }
@@ -1258,13 +1246,11 @@ pub fn face_name_at_body(body: &ModelBody, point: Vec3) -> Option<String> {
     if body.body.is_mesh() || !point.is_finite() {
         return None;
     }
-    let mesh = body.mesh();
-    let count = face_count(body);
-    if mesh.triangles.len() > 2_000_000 || count > 50_000 {
+    if body.body.face_count() > 50_000 {
         return None;
     }
     let tolerance = (body.body.size() * 1e-3).max(1e-3);
-    let index = FaceIndex::new(&mesh, count).face_at(point, tolerance)?;
+    let index = body.body.face_at(point, tolerance)?;
     face_names(body).get(index).filter(|name| !name.is_empty()).cloned()
 }
 

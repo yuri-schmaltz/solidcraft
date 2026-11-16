@@ -5467,23 +5467,22 @@ fn hole_on_surface_in(st: &ModelState, p: Vec3, dir: Vec3, scope: &[String], fro
     let eps = size * 1e-6;
     let mut best: Option<Vec3> = None;
     for b in st.bodies.iter().filter(|b| in_hole_scope(scope, b)) {
-        let m = b.mesh();
-        // Every test below casts along the line through `p`: a mesh whose box that line misses
-        // has no triangle to hit, so skip it before scanning its triangles (in an assembly of
-        // hundreds of parts, these scans were most of a hole's time).
-        if !line_meets_box(p, dir, &m.bounds().inflated(eps * 8.0)) {
+        if let Ok(bounds) = b.body.exact_bounds()
+            && !line_meets_box(p, dir, &bounds.inflated(eps * 8.0))
+        {
             continue;
         }
         // Already on the surface: the drill enters right here.
-        if let Some((t, _)) = m.raycast(p - dir * eps, dir)
+        if let Some((t, _)) = b.body.raycast_face(p - dir * eps, dir)
             && t < eps * 4.0
         {
             return p;
         }
-        if !from_inside && m.contains(p) {
+        let inside = b.body.contains(p);
+        if !from_inside && inside {
             return p;
         }
-        let q = if m.contains(p) { m.raycast(p, -dir).map(|(t, _)| p - dir * t) } else { m.raycast(p, dir).map(|(t, _)| p + dir * t) };
+        let q = if inside { b.body.raycast_face(p, -dir).map(|(t, _)| p - dir * t) } else { b.body.raycast_face(p, dir).map(|(t, _)| p + dir * t) };
         if let Some(q) = q
             && best.is_none_or(|bq| q.dist(p) < bq.dist(p))
         {
@@ -5500,22 +5499,16 @@ fn hole_on_surface_in(st: &ModelState, p: Vec3, dir: Vec3, scope: &[String], fro
 fn faces_near(st: &ModelState, p: Vec3, reach: f64, scope: &[String]) -> Vec<NearFace> {
     let mut out: Vec<NearFace> = Vec::new();
     for (i, b) in st.bodies.iter().enumerate().filter(|(_, b)| !b.body.is_mesh() && in_hole_scope(scope, b)) {
-        let m = b.mesh();
-        // No facet is nearer `p` than the mesh's box: one beyond `reach` has none to give.
-        if !m.bounds().inflated(reach).contains(p) {
+        if let Ok(bounds) = b.body.exact_bounds()
+            && !bounds.inflated(reach.max(1e-6)).contains(p)
+        {
             continue;
         }
-        // The nearest facet of each face of this body.
-        let mut near: BTreeMap<u32, (f64, Vec3)> = BTreeMap::new();
-        for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-            let Some([a, bb, c]) = m.tri(t) else { continue };
-            let d = crate::appearance::closest_on_triangle(p, a, bb, c).dist(p);
-            let Some(n) = (bb - a).cross(c - a).normalized() else { continue };
-            if d <= reach && near.get(f).is_none_or(|(x, _)| d < *x) {
-                near.insert(*f, (d, n));
+        for (f, d, n) in b.body.faces_within(p, reach) {
+            if let Ok(f) = u32::try_from(f) {
+                out.push((d, i, f, n));
             }
         }
-        out.extend(near.into_iter().map(|(f, (d, n))| (d, i, f, n)));
     }
     out.sort_by(|a, b| a.0.total_cmp(&b.0));
     out
@@ -5967,8 +5960,7 @@ fn blend_edges_on(mb: &ModelBody, f: &Feature, edges: &[crate::Position], idx: &
 /// of the edge (an upstream edit moved the edge along it), where the edges meeting there are as
 /// near: then the edge's middle.
 fn off_the_ends(mb: &ModelBody, edge: usize, p: Vec3) -> Vec3 {
-    let m = mb.mesh();
-    let Some(e) = m.edges.get(edge) else { return p };
+    let Some(e) = mb.body.edge_points(edge) else { return p };
     let tight = (mb.body.size() * 2e-3).max(1e-3);
     let (Some(a), Some(b)) = (e.first(), e.last()) else { return p };
     if p.dist(*a) > tight && p.dist(*b) > tight {
@@ -6270,10 +6262,7 @@ fn hole_reaches(st: &ModelState, p: Vec3, d: Vec3, ahead: bool, scope: &[String]
     let size = st.bodies.iter().map(|b| b.body.size()).fold(1.0, f64::max);
     let eps = size * 1e-6;
     let q = p + d * eps;
-    st.bodies.iter().filter(|b| in_hole_scope(scope, b)).any(|b| {
-        let m = b.mesh();
-        m.contains(q) || (ahead && m.raycast(q, d).is_some())
-    })
+    st.bodies.iter().filter(|b| in_hole_scope(scope, b)).any(|b| b.body.contains(q) || (ahead && b.body.raycast_face(q, d).is_some()))
 }
 
 /// The side hole centres on a sketch drill to: into the material, whichever way the sketch plane
@@ -6428,9 +6417,8 @@ fn hole_depth_to(st: &ModelState, at: &Vec3, dir: Vec3, to: &Option<Vec3>, depth
     // The face at the To point, met along the axis.
     for b in st.bodies.iter().filter(|b| !b.body.is_mesh()) {
         let Some(fi) = crate::appearance::face_index_at(b, *t) else { continue };
-        let m = b.mesh();
-        if let Some((h, tri)) = m.raycast(*at + dir * 1e-6, dir)
-            && m.tri_face.get(tri).is_some_and(|x| *x as usize == fi)
+        if let Some((h, hit_face)) = b.body.raycast_face(*at + dir * 1e-6, dir)
+            && hit_face == fi
         {
             d = h + 1e-6;
         }
@@ -9528,10 +9516,9 @@ fn height_at(st: &ModelState, face: Option<(usize, usize)>, plane: &Plane, centr
         return square.level;
     }
     // A curved or slanted face: where the profile's middle meets it.
-    let m = b.mesh();
     for dir in [n, n * -1.0] {
-        if let Some((t, tri)) = m.raycast(centre, dir)
-            && m.tri_face.get(tri).is_some_and(|x| *x as usize == fi)
+        if let Some((t, hit_face)) = b.body.raycast_face(centre, dir)
+            && hit_face == fi
         {
             return h(centre + dir * t);
         }
@@ -9574,18 +9561,7 @@ fn nearest_object_face(b: &ModelBody, p: Vec3, normal: Option<Vec3>) -> Option<(
         return Some(nearest);
     }
     let tie = (b.body.size() * 1e-9).max(1e-7);
-    let mesh = b.mesh();
-    mesh.triangles
-        .iter()
-        .zip(&mesh.tri_face)
-        .filter(|(_, fi)| caps.contains(&(**fi as usize)))
-        .filter_map(|(tri, fi)| {
-            let [a, b, c] = mesh.tri(tri)?;
-            let d = crate::appearance::closest_on_triangle(p, a, b, c).dist(p);
-            (d <= nearest.0 + tie).then_some((d, *fi as usize))
-        })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .or(Some(nearest))
+    b.body.nearest_face_in(p, &caps, nearest.0 + tie).or(Some(nearest))
 }
 
 /// The face a To / From Object point stands for, `(body index, face index)`: the face its
@@ -9926,18 +9902,7 @@ fn offset_sheet(target: &ModelBody, face: usize, near: Vec3, travel: Vec3, offse
 
 /// One point on each face of a body (a triangle centre, so it lies on the face).
 fn face_samples(b: &ModelBody) -> Vec<Vec3> {
-    let m = b.mesh();
-    let mut out: Vec<Option<Vec3>> = Vec::new();
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-        let f = *f as usize;
-        if out.len() <= f {
-            out.resize(f + 1, None);
-        }
-        if let (Some(slot @ None), Some([a, bb, c])) = (out.get_mut(f), m.tri(t)) {
-            *slot = Some((a + bb + c) * (1.0 / 3.0));
-        }
-    }
-    out.into_iter().flatten().collect()
+    b.body.face_samples()
 }
 
 /// The picked faces and every face joined to them smoothly (across tangent edges).
@@ -10067,23 +10032,14 @@ fn face_plane(st: &ModelState, picked: &Plane, at: Vec3, name: Option<&str>) -> 
     let mut best: Option<(f64, f64)> = None; // (distance from `at`, plane offset along n)
     for b in &st.bodies {
         let tol = (b.body.size() * 1e-3).max(1e-3);
-        let (Ok(faces), Ok(mesh)) = (b.body.faces(tol), b.body.mesh(&solidcraft_kernel::MeshTolerance::chord(tol))) else { continue };
-        for f in faces {
-            let Some(fnrm) = f.plane_normal else { continue };
-            if fnrm.dot(n) < 1.0 - 1e-6 {
-                continue;
-            }
-            let d = mesh
-                .triangles
-                .iter()
-                .zip(&mesh.tri_face)
-                .filter(|(_, tf)| **tf as usize == f.index)
-                .filter_map(|(t, _)| mesh.tri(t))
-                .map(|[a, bb, c]| crate::project::closest_on_triangle(at, a, bb, c).dist(at))
-                .fold(f64::INFINITY, f64::min);
-            if best.is_none_or(|x| d < x.0) {
-                best = Some((d, f.centroid.dot(n)));
-            }
+        let Ok(faces) = b.body.faces(tol) else { continue };
+        let caps: std::collections::BTreeSet<usize> =
+            faces.iter().filter(|f| f.plane_normal.is_some_and(|fnrm| fnrm.dot(n) >= 1.0 - 1e-6)).map(|f| f.index).collect();
+        if let Some((d, fi)) = b.body.nearest_face_in(at, &caps, f64::INFINITY)
+            && let Some(f) = faces.iter().find(|f| f.index == fi)
+            && best.is_none_or(|x| d < x.0)
+        {
+            best = Some((d, f.centroid.dot(n)));
         }
     }
     Ok(match best {
@@ -12673,8 +12629,8 @@ mod named_face_lookup_tests {
         let h = hit.unwrap();
         assert_eq!(h.body, 7);
         assert_eq!(found(hit), found(crate::naming::locate_face(&st, &name, top)));
-        // Looking over every body names (and so meshes) them all.
-        assert!(st.bodies.iter().all(|b| b.mesh.get().is_some()));
+        // Looking over every body still finds the same face without needing to mesh them all.
+        assert!(st.bodies.iter().all(|b| !crate::naming::face_names(b).is_empty()));
     }
 
     /// A name the named body has no face of (it moved to another body: a combine took the face),

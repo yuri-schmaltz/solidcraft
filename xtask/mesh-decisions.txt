@@ -4,20 +4,10 @@
 # not listed here, and on a listed one that no longer does: a fix removes its line in the same
 # pull request. Never add a line: decide with exact geometry (`Body::exact_bounds`,
 # `kernel::apart`, the B-rep's faces and edges). These are truck-era uses SMLib answers exactly.
-crates/doc/src/appearance.rs:nearest_face picks the face nearest a point by the display mesh's triangles
 crates/doc/src/eval.rs:blend_edges_on finds a blend's edges on the display mesh
 crates/doc/src/eval.rs:edge_refs turns edge picks into references through the display mesh
 crates/doc/src/eval.rs:eval_feature_kind places features by the display mesh (faces, edges, nearness)
-crates/doc/src/eval.rs:face_plane finds a sketch's face plane again on a mesh
-crates/doc/src/eval.rs:face_samples takes a point on each face from its mesh triangles
-crates/doc/src/eval.rs:faces_near finds the faces near a point by the display mesh
 crates/doc/src/eval.rs:feature_tools_with_constructor reaches a To Object extent by the display mesh
-crates/doc/src/eval.rs:height_at measures a point's height on a face by the display mesh
-crates/doc/src/eval.rs:hole_depth_to works out a hole's To Object depth on the display mesh
-crates/doc/src/eval.rs:hole_on_surface_in moves a hole back onto its face by the display mesh
-crates/doc/src/eval.rs:hole_reaches decides whether a drill reaches material by the display mesh
-crates/doc/src/eval.rs:nearest_object_face picks an extrusion's To Object face by the display mesh
-crates/doc/src/eval.rs:off_the_ends moves an edge point off the edge's ends by the display mesh
 crates/doc/src/eval.rs:parallel_tapped_wall finds a tapped hole's parallel wall on the display mesh
 crates/doc/src/eval.rs:resolve_edges finds edge references again on a mesh
 crates/doc/src/eval.rs:tangent_face_chain grows a face pick across tangent edges on the display mesh
@@ -25,8 +15,6 @@ crates/doc/src/eval.rs:trim_to_body keeps the tool pieces touching the start by 
 crates/doc/src/eval.rs:unrecorded_touches finds touching pieces by a mesh
 crates/doc/src/eval_more.rs:FaceSlice::outline finds the wall an outline runs along by mesh triangles
 crates/doc/src/eval_more.rs:FaceSlice::recesses finds a plate's recesses by mesh triangles
-crates/doc/src/eval_more.rs:body_under picks the body under a plastic feature's point by the display mesh
-crates/doc/src/eval_more.rs:planar_normal_at finds the planar face through a point by a mesh
 crates/doc/src/eval_more.rs:plastic_eval places plastic features by a mesh
 crates/doc/src/eval_more.rs:rib_tool runs a rib to the body by the display mesh
 crates/doc/src/eval_more.rs:rib_tool_normal runs a rib to the body by the display mesh
@@ -53,12 +41,6 @@ crates/doc/src/name_lookup.rs:sheet_locate finds a sheet face by its name on the
 crates/doc/src/naming.rs:FaceIndex::new indexes faces by mesh triangles for naming
 crates/doc/src/naming.rs:blend_seams finds blend seams on the display mesh
 crates/doc/src/naming.rs:carried_face_names carries face names to imported bodies by the display mesh
-crates/doc/src/naming.rs:edge_names_at names the edges nearest points by the display mesh
-crates/doc/src/naming.rs:edge_names_from names edges from their faces by the display mesh
-crates/doc/src/naming.rs:face_centres takes face centres from mesh triangles
-crates/doc/src/naming.rs:face_count counts faces by the display mesh
-crates/doc/src/naming.rs:face_name_at_body names a face at a point by the display mesh
-crates/doc/src/naming.rs:face_names_at names the faces holding points by the display mesh
 crates/doc/src/naming.rs:face_spot finds where a face is by the display mesh
 crates/doc/src/naming.rs:face_spots finds where faces are by the display mesh
 crates/doc/src/naming.rs:geometric_names names faces from sample points on the display mesh
