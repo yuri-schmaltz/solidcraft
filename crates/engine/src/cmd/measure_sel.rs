@@ -55,7 +55,7 @@ fn edge_index(m: &Mesh, index: Option<usize>, point: Vec3) -> Option<usize> {
 }
 
 fn face_tris(m: &Mesh, f: usize) -> Vec<[Vec3; 3]> {
-    m.triangles.iter().zip(&m.tri_face).filter(|(_, tf)| **tf as usize == f).filter_map(|(t, _)| m.tri(t)).collect()
+    m.tri_indices().iter().zip(&m.tri_face).filter(|(_, tf)| **tf as usize == f).filter_map(|(t, _)| m.tri(t)).collect()
 }
 
 /// A described item: its geometry, direction (planar face normal, straight edge direction),
@@ -315,7 +315,7 @@ fn face_slot(b: &solidcraft_doc::ModelBody, m: &Mesh, shape: &Shape, pts: &[Vec3
         return None;
     }
     let mut verts: Vec<Vec<Vec3>> = vec![Vec::new(); faces];
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
+    for (t, f) in m.tri_indices().iter().zip(&m.tri_face) {
         if let (Some(v), Some(tri)) = (verts.get_mut(*f as usize), m.tri(t)) {
             v.extend(tri);
         }
@@ -373,7 +373,7 @@ fn describe(s: &Session, st: &solidcraft_doc::ModelState, sel: &Sel) -> Option<I
         }),
         Sel::Edge { body, index, point } => {
             let b = st.body(body)?;
-            let m = b.mesh();
+            let m = b.display_mesh();
             let index = edge_index(&m, Some(*index), *point)?;
             let pts = m.edges.get(index)?;
             let rim = m.circular_rim(index);
@@ -400,7 +400,7 @@ fn describe(s: &Session, st: &solidcraft_doc::ModelState, sel: &Sel) -> Option<I
         }
         Sel::Face { body, index, .. } => {
             let b = st.body(body)?;
-            let m = b.mesh();
+            let m = b.display_mesh();
             let patch = m.surface_patch(*index);
             let tris = patch.iter().flat_map(|f| face_tris(&m, *f)).collect::<Vec<_>>();
             let on_mesh: f64 = tris.iter().map(|[a, b, c]| (*b - *a).cross(*c - *a).len() * 0.5).sum();
@@ -449,8 +449,8 @@ fn describe(s: &Session, st: &solidcraft_doc::ModelState, sel: &Sel) -> Option<I
         Sel::Body { name } => {
             let body = st.body(name)?;
             let closed = crate::cmd::inspect::encloses_volume(&body.body);
-            let m = body.mesh();
-            let tris: Vec<[Vec3; 3]> = m.triangles.iter().filter_map(|t| m.tri(t)).collect();
+            let m = body.display_mesh();
+            let tris: Vec<[Vec3; 3]> = m.tri_indices().iter().filter_map(|t| m.tri(t)).collect();
             let definitions = s.model.state();
             let v = if definitions.sheets.iter().any(|sheet| sheet.body == body.definition_name() && !sheet.perforations.is_empty()) {
                 super::inspect::measure_body(body, Some(&definitions)).ok()?.volume
@@ -692,11 +692,18 @@ struct Pick {
 fn resolve_pick(st: &solidcraft_doc::ModelState, face: bool, value: &Value) -> std::result::Result<Sel, String> {
     let Pick { body, point, index } = serde_json::from_value(value.clone()).map_err(|e| e.to_string())?;
     let b = st.body(&body).ok_or_else(|| format!("no body named '{body}'"))?;
-    let m = b.mesh();
+    let m = b.display_mesh();
     let point = match (point, index) {
         (Some(p), _) => p,
-        (None, Some(i)) if face => face_tris(&m, i).first().map(|t| t[0]).ok_or_else(|| format!("'{body}' has no face {i}"))?,
-        (None, Some(i)) => m.edges.get(i).and_then(|e| e.get(e.len() / 2).copied()).ok_or_else(|| format!("'{body}' has no edge {i}"))?,
+        (None, Some(i)) if face => {
+            b.body.face_internal_point(i).or_else(|| face_tris(&m, i).first().map(|t| t[0])).ok_or_else(|| format!("'{body}' has no face {i}"))?
+        }
+        (None, Some(i)) => b
+            .body
+            .edge_points(i)
+            .and_then(|e| e.get(e.len() / 2).copied())
+            .or_else(|| m.edges.get(i).and_then(|e| e.get(e.len() / 2).copied()))
+            .ok_or_else(|| format!("'{body}' has no edge {i}"))?,
         (None, None) => return Err("give a `point` on the item or its `index`".into()),
     };
     if face {

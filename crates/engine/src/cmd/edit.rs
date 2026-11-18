@@ -1565,8 +1565,7 @@ fn selection_item(s: &Session, value: Value) -> Result<Sel> {
             let point = if face {
                 solidcraft_doc::naming::face_spot(b, index).map(|spot| spot.point)
             } else {
-                let mesh = b.mesh();
-                mesh.edges.get(index).and_then(|edge| match edge.as_slice() {
+                b.body.edge_points(index).or_else(|| b.display_mesh().edges.get(index).cloned()).and_then(|edge| match edge.as_slice() {
                     [a, b] => Some(a.lerp(*b, 0.5)),
                     // Use a sample on the curve, not the midpoint of a chord inside it.
                     points if points.len() > 2 => points.get(points.len() / 2).copied(),
@@ -1579,11 +1578,11 @@ fn selection_item(s: &Session, value: Value) -> Result<Sel> {
             let index = if face {
                 solidcraft_doc::appearance::face_index_at(b, point)
             } else {
-                let mesh = b.mesh();
-                mesh.edges
-                    .iter()
+                b.body
+                    .edge_faces_and_points()
+                    .into_iter()
                     .enumerate()
-                    .filter_map(|(index, edge)| {
+                    .filter_map(|(index, (_, edge))| {
                         let distance =
                             edge.windows(2).filter_map(|w| Some(point.dist_to_segment(*w.first()?, *w.get(1)?))).fold(f64::INFINITY, f64::min);
                         (distance <= solidcraft_doc::appearance::pick_tolerance(b)).then_some((index, distance))

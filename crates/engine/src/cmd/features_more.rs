@@ -232,19 +232,7 @@ fn emboss(s: &mut Session, p: &Value) -> Result<Value> {
             if !targets.is_empty() && !targets.iter().any(|n| n == definition || n == &body.name) {
                 continue;
             }
-            let mesh = body.mesh();
-            let closest = mesh
-                .triangles
-                .iter()
-                .zip(&mesh.tri_face)
-                .filter_map(|(tri, face)| {
-                    let [a, b, c] = mesh.tri(tri)?;
-                    let n = (b - a).cross(c - a).normalized()?;
-                    let q = at - n * (at - a).dot(n);
-                    let inside = [(a, b), (b, c), (c, a)].iter().all(|(u, v)| (*v - *u).cross(q - *u).dot(n) >= -1e-9);
-                    inside.then_some(((at - a).dot(n).abs(), *face as usize))
-                })
-                .min_by(|a, b| a.0.total_cmp(&b.0));
+            let closest = body.body.nearest_face(at);
             match closest {
                 Some((distance, index)) if distance < (body.body.size() * 1e-3).max(1e-3) => candidates.push((body, index)),
                 Some((distance, _)) if nearest.is_none_or(|(d, _)| distance < d) => nearest = Some((distance, body.name.as_str())),
@@ -699,7 +687,7 @@ pub(crate) fn snap_point(st: &solidcraft_doc::ModelState, kind: &str, at: Vec3) 
         "vertex" => near(
             st.bodies
                 .iter()
-                .flat_map(|b| b.mesh().edges.iter().flat_map(|e| [e.first().copied(), e.last().copied()]).flatten().collect::<Vec<_>>())
+                .flat_map(|b| b.body.record().vertices.iter().map(|v| Vec3::new(v.point[0], v.point[1], v.point[2])).collect::<Vec<_>>())
                 .collect(),
         ),
         "edge_mid" => {

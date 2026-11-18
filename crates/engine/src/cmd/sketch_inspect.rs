@@ -267,19 +267,25 @@ fn min_of(teeth: &[(Vec3, f64, Vec3)]) -> Option<(f64, Vec3)> {
 fn face_at(st: &solidcraft_doc::ModelState, at: Vec3) -> Option<(usize, u32)> {
     let mut best: Option<(f64, usize, u32)> = None;
     for (bi, b) in st.bodies.iter().enumerate() {
-        let m = b.mesh();
-        for (ti, t) in m.triangles.iter().enumerate() {
-            let [a, bb, c] = t.map(|i| m.positions.get(i as usize).copied().unwrap_or_default());
-            let d = at.dist(closest_on_triangle(at, a, bb, c));
+        if let Some((d, f)) = b.body.nearest_face(at) {
             if best.is_none_or(|x| d < x.0) {
-                best = Some((d, bi, m.tri_face.get(ti).copied().unwrap_or(0)));
+                best = Some((d, bi, f as u32));
+            }
+        } else {
+            let m = b.display_mesh();
+            for (ti, t) in m.tri_indices().iter().enumerate() {
+                let [a, bb, c] = t.map(|i| m.positions.get(i as usize).copied().unwrap_or_default());
+                let d = at.dist(tri_closest(at, a, bb, c));
+                if best.is_none_or(|x| d < x.0) {
+                    best = Some((d, bi, m.tri_face.get(ti).copied().unwrap_or(0)));
+                }
             }
         }
     }
     best.filter(|b| b.0 < 1.0).map(|b| (b.1, b.2))
 }
 
-fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+fn tri_closest(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     // Project onto the plane, then clamp to the edges if outside.
     let n = (b - a).cross(c - a);
     let nn = n.dot(n);
@@ -299,11 +305,16 @@ fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     [seg(a, b), seg(b, c), seg(c, a)].into_iter().min_by(|x, y| x.dist(p).total_cmp(&y.dist(p))).unwrap_or(a)
 }
 
+#[cfg(test)]
+fn closest_on_triangle(p: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    tri_closest(p, a, b, c)
+}
+
 /// Smallest radius of curvature over a face of a mesh, from the turn of the vertex normals
 /// along each triangle side: (radius, where).
 fn face_min_radius(m: &solidcraft_geom::Mesh, face: u32) -> Option<(f64, Vec3)> {
     let mut best: Option<(f64, Vec3)> = None;
-    for (ti, t) in m.triangles.iter().enumerate() {
+    for (ti, t) in m.tri_indices().iter().enumerate() {
         if m.tri_face.get(ti) != Some(&face) {
             continue;
         }
@@ -355,13 +366,13 @@ fn minimum_radius(s: &mut Session, p: &Value) -> Result<Value> {
     };
     for at in &faces {
         let (bi, f) = face_at(&st, *at).ok_or_else(|| bad(cmd, "no face there"))?;
-        let m = st.bodies.get(bi).map(|b| b.mesh()).ok_or_else(|| bad(cmd, "body"))?;
+        let m = st.bodies.get(bi).map(|b| b.display_mesh()).ok_or_else(|| bad(cmd, "body"))?;
         items.push((format!("face@{},{},{}", at.x, at.y, at.z), face_min_radius(&m, f)));
     }
     if items.is_empty() {
         // Every face of every body.
         for b in &st.bodies {
-            let m = b.mesh();
+            let m = b.display_mesh();
             let n = m.tri_face.iter().copied().max().map(|x| x + 1).unwrap_or(0);
             for f in 0..n.min(100_000) {
                 items.push((format!("{}:face{f}", b.name), face_min_radius(&m, f)));

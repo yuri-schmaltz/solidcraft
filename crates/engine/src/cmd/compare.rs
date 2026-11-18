@@ -135,7 +135,7 @@ fn difference(ma: &Value, mb: &Value) -> Difference {
 /// The volume a closed mesh encloses (divergence theorem, about its box's centre).
 fn enclosed_volume(m: &solidcraft_geom::Mesh) -> f64 {
     let o = m.bounds().center();
-    m.triangles.iter().filter_map(|t| m.tri(t)).map(|[a, b, c]| (a - o).dot((b - o).cross(c - o)) / 6.0).sum()
+    m.tri_indices().iter().filter_map(|t| m.tri(t)).map(|[a, b, c]| (a - o).dot((b - o).cross(c - o)) / 6.0).sum()
 }
 
 /// What makes the comparison less certain: a body whose surface does not enclose what it
@@ -273,7 +273,7 @@ fn compare_bodies(s: &mut Session, p: &Value) -> Result<Value> {
     // body's size), so two meshes of one surface agree well within it.
     let chord = tolerance / 4.0;
     let mut done = solidcraft_kernel::map_on_threads(&[ba, bb], 2, |b| {
-        (super::inspect::measure_json(b), b.body.mesh(&solidcraft_kernel::MeshTolerance::chord(chord)))
+        (super::inspect::measure_json(b), b.body.display_mesh_at(&solidcraft_kernel::MeshTolerance::chord(chord)))
     })
     .into_iter()
     .zip([&na, &nb]);
@@ -281,7 +281,7 @@ fn compare_bodies(s: &mut Session, p: &Value) -> Result<Value> {
         let Some((r, name)) = done.next() else { return Err(bad(cmd, "no such body")) };
         let (m, mesh) = r.ok_or_else(|| bad(cmd, format!("`{name}`: measuring it failed")))?;
         let mesh = mesh.map_err(|e| bad(cmd, format!("`{name}`: {e}")))?;
-        if mesh.triangles.is_empty() {
+        if mesh.tri_indices().is_empty() {
             return Err(bad(cmd, format!("`{name}` has no surface")));
         }
         Ok((m, mesh))
@@ -394,7 +394,7 @@ fn compare_bodies(s: &mut Session, p: &Value) -> Result<Value> {
         only_in_b: SideTotal { regions: cb, volume_mm3: vb },
         unlisted_regions: c.unlisted,
         warnings,
-        sampling: Sampling { spacing_mm: c.spacing, chord_mm: chord, triangles_a: mesh_a.triangles.len(), triangles_b: mesh_b.triangles.len() },
+        sampling: Sampling { spacing_mm: c.spacing, chord_mm: chord, triangles_a: mesh_a.tri_indices().len(), triangles_b: mesh_b.tri_indices().len() },
         colored_faces,
         param_warnings: Vec::new(),
     };

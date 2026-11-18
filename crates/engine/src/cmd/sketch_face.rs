@@ -145,12 +145,12 @@ fn capture_impl(s: &Session, value: &Value, cmd: &str, internal: bool) -> Result
             // The model's own mesh of the body, which picks name their face from: made once and
             // kept, so a face is captured without meshing the body again. A large body with many
             // B-spline faces took tens of seconds to mesh here twice, at a tenth of its chord.
-            let mesh = body.mesh();
+            let mesh = body.display_mesh();
             let count = body.body.face_count();
             // The triangles are grouped by face once, and a face's test reads only its own: the
             // work is the mesh plus one plane test per face, not the mesh once per face (a
             // modelled thread leaves thousands of faces, #6720).
-            work = work.saturating_add(mesh.triangles.len()).saturating_add(count);
+            work = work.saturating_add(mesh.tri_indices().len()).saturating_add(count);
             if work > 2_000_000 {
                 return Err(bad(cmd, "face capture work limit exceeded; use an exact body and face index"));
             }

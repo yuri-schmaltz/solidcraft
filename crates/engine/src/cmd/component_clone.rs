@@ -13,7 +13,7 @@ const CMD: &str = "component.paste_new";
 const MAX_WORK: usize = 10_000;
 
 fn mesh_distance(mesh: &solidcraft_geom::Mesh, point: solidcore_record::Vec3) -> f64 {
-    mesh.triangles
+    mesh.tri_indices()
         .iter()
         .filter_map(|triangle| mesh.tri(triangle))
         .map(|[a, b, c]| {
@@ -830,11 +830,11 @@ pub(super) fn build(
         let mut material_matches = true;
         let tol_a = (a.size() * 1e-3).max(1e-3).max(a.size() * 1e-6);
         let tol_b = (b.size() * 1e-3).max(1e-3).max(b.size() * 1e-6);
-        let mesh_a = a.mesh(&solidcraft_kernel::MeshTolerance::chord(tol_a))?;
-        let mesh_b = b.mesh(&solidcraft_kernel::MeshTolerance::chord(tol_b))?;
+        let mesh_a = a.display_mesh_at(&solidcraft_kernel::MeshTolerance::chord(tol_a))?;
+        let mesh_b = b.display_mesh_at(&solidcraft_kernel::MeshTolerance::chord(tol_b))?;
         // Precharge all 27 candidates, six possible replacements, their triangle
         // distances and the three containment rays before any proof traversal.
-        proof_work = proof_work.saturating_add(mesh_a.triangles.len().saturating_add(mesh_b.triangles.len()).saturating_mul(27 * 7 * 4));
+        proof_work = proof_work.saturating_add(mesh_a.tri_indices().len().saturating_add(mesh_b.tri_indices().len()).saturating_mul(27 * 7 * 4));
         if proof_work > 50_000_000 {
             return Err(bad(CMD, "geometry verification exceeds copy work limit"));
         }

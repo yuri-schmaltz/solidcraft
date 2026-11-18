@@ -2064,11 +2064,10 @@ fn cam_profile(s: &Session, p: &Value, cmd: &str) -> Result<CamProfile> {
         .iter()
         .map(|q| {
             let near = |b: &&solidcraft_doc::ModelBody| {
-                b.mesh()
-                    .edges
-                    .iter()
-                    .flat_map(|e| e.windows(2))
-                    .filter_map(|w| Some(q.dist_to_segment(*w.first()?, *w.get(1)?)))
+                b.body
+                    .edge_faces_and_points()
+                    .into_iter()
+                    .flat_map(|(_, e)| e.windows(2).filter_map(|w| Some(q.dist_to_segment(*w.first()?, *w.get(1)?))).collect::<Vec<_>>())
                     .fold(f64::MAX, f64::min)
             };
             bodies

@@ -1788,7 +1788,7 @@ fn edge_points(s: &Session, p: &Value, cmd: &str) -> Result<EdgePicks> {
         let tol = (size * 2e-3).max(1e-3);
         // The display mesh flags seams (a smooth surface meeting itself, as down the side
         // of a cylinder), which nobody means by a pick where they end.
-        let shape = match b.body.mesh(&solidcraft_kernel::MeshTolerance::chord(tol)) {
+        let shape = match b.body.display_mesh_at(&solidcraft_kernel::MeshTolerance::chord(tol)) {
             // An edge where the faces meet tangentially (the spans of a spline wall
             // meeting) can't be blended either: nobody means it by a pick.
             Ok(m) => Some((

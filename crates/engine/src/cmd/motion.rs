@@ -336,8 +336,8 @@ pub fn collisions(s: &Session) -> Vec<(String, String, f64)> {
 /// no sample point inside (#3323).
 fn overlap(a: &Body, b: &Body) -> Option<f64> {
     let (ma, mb) = (
-        a.mesh(&solidcraft_kernel::MeshTolerance::chord((a.size() * 1e-3).max(1e-3))).ok()?,
-        b.mesh(&solidcraft_kernel::MeshTolerance::chord((b.size() * 1e-3).max(1e-3))).ok()?,
+        a.display_mesh_at(&solidcraft_kernel::MeshTolerance::chord((a.size() * 1e-3).max(1e-3))).ok()?,
+        b.display_mesh_at(&solidcraft_kernel::MeshTolerance::chord((b.size() * 1e-3).max(1e-3))).ok()?,
     );
     mesh_overlap(&ma, &mb, 1e-4 * a.size().max(b.size()).max(1.0))
 }
@@ -358,7 +358,7 @@ fn mesh_overlap(ma: &solidcraft_geom::Mesh, mb: &solidcraft_geom::Mesh, tol: f64
 }
 
 fn tris(m: &solidcraft_geom::Mesh) -> Vec<[Vec3; 3]> {
-    m.triangles.iter().filter_map(|t| m.tri(t)).collect()
+    m.tri_indices().iter().filter_map(|t| m.tri(t)).collect()
 }
 
 /// The deepest any sample point of `a` lies inside `b` (0 if none). `b`'s triangles are indexed

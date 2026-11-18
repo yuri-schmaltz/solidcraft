@@ -37,13 +37,6 @@ pub(super) fn face_normal_in(s: &Session, p: Vec3, body: Option<&str>) -> Option
     b.body.face_plane_normal(f as usize)
 }
 
-/// Is a face `d` from a point near enough to hold it: within a thousandth of the body's
-/// size (at least 1 µm), ten times over, as picks placed on faces are taken.
-fn near_face(m: &Mesh, d: f64) -> bool {
-    let tol = (m.bounds().diagonal() * 1e-3).max(1e-3);
-    d <= tol * 10.0
-}
-
 /// Does `p` lie on a face of a body (planar or curved), as features placed on a face need?
 /// Where flush bodies' faces are equally near, it lies on each of them. A point in the opening
 /// of a planar face (the mouth of an existing bore, which a counterbore is centred on) is on
@@ -67,25 +60,18 @@ pub(super) fn on_a_face(s: &Session, p: Vec3) -> bool {
 /// Does `p` lie in the plane of a planar face of `b`, inside the hull of that face's corners
 /// (so over its openings, not past its edge)?
 fn in_a_planar_face_outline(b: &solidcraft_doc::ModelBody, p: Vec3) -> bool {
-    let m = b.mesh();
-    let mut faces: std::collections::BTreeMap<u32, Vec<[Vec3; 3]>> = std::collections::BTreeMap::new();
-    for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-        if let Some(tri) = m.tri(t) {
-            faces.entry(*f).or_default().push(tri);
-        }
-    }
-    faces.values().any(|tris| {
-        let Some([a, b, c]) = tris.first().copied() else { return false };
-        let Some(n) = (b - a).cross(c - a).normalized() else { return false };
-        let planar = tris.iter().all(|[a, b, c]| (*b - *a).cross(*c - *a).normalized().is_some_and(|k| k.dot(n) > 1.0 - 1e-6));
-        if !planar || !near_face(&m, (p - a).dot(n).abs()) {
+    let tol = (b.outline_bounds().diagonal() * 1e-3).max(1e-3);
+    (0..b.body.face_count()).any(|fi| {
+        let Some(plane) = b.body.planar_face(fi) else { return false };
+        let n = plane.normal();
+        if (p - plane.origin).dot(n).abs() > tol * 10.0 {
             return false;
         }
         let reference = if n.x.abs() < 0.9 { Vec3::new(1.0, 0.0, 0.0) } else { Vec3::new(0.0, 1.0, 0.0) };
         let Some(u) = n.cross(reference).normalized() else { return false };
         let v = n.cross(u);
         let flat = |q: Vec3| (q.dot(u), q.dot(v));
-        let mut corners: Vec<(f64, f64)> = tris.iter().flatten().map(|q| flat(*q)).collect();
+        let mut corners: Vec<(f64, f64)> = b.body.face_edge_polylines(fi).into_iter().flatten().map(flat).collect();
         corners.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
         corners.dedup();
         inside_hull(&corners, flat(p))
@@ -314,15 +300,18 @@ pub(super) fn face_at_state(st: &solidcraft_doc::ModelState, p: Vec3, only: Opti
     let mut best: Option<FacePick> = None;
     let mut tied: Vec<String> = Vec::new();
     for b in st.bodies.iter().filter(|b| only.is_none_or(|n| b.name == n)) {
-        let m = b.mesh();
-        let mut near: Option<(u32, f64)> = None;
-        for (t, f) in m.triangles.iter().zip(&m.tri_face) {
-            let Some([a, bb, c]) = m.tri(t) else { continue };
-            let d = point_triangle_dist(p, a, bb, c);
-            if near.is_none_or(|(_, nd)| d < nd) {
-                near = Some((*f, d));
+        let m = b.display_mesh();
+        let near = b.body.nearest_face(p).map(|(d, f)| (f as u32, d)).or_else(|| {
+            let mut near: Option<(u32, f64)> = None;
+            for (t, f) in m.tri_indices().iter().zip(&m.tri_face) {
+                let Some([a, bb, c]) = m.tri(t) else { continue };
+                let d = point_triangle_dist(p, a, bb, c);
+                if near.is_none_or(|(_, nd)| d < nd) {
+                    near = Some((*f, d));
+                }
             }
-        }
+            near
+        });
         if let Some((f, d)) = near {
             if best.as_ref().is_none_or(|x| d < x.2 - 1e-8) {
                 best = Some((m.clone(), f, d, b.name.clone()));
@@ -419,14 +408,18 @@ pub(super) fn sketch_of_faces(s: &mut Session, points: &[Vec3], cmd: &str, face_
         if picked.iter().any(|(face, _)| *face == index as usize) {
             continue;
         }
-        let inside = mesh
-            .triangles
-            .iter()
-            .zip(&mesh.tri_face)
-            .filter(|(_, face)| **face == index)
-            .filter_map(|(triangle, _)| mesh.tri(triangle))
-            .max_by(|[a, b, c], [x, y, z]| ((*b - *a).cross(*c - *a).len()).total_cmp(&((*y - *x).cross(*z - *x).len())))
-            .map(|[a, b, c]| (a + b + c) / 3.0)
+        let inside = body
+            .body
+            .face_internal_point(index as usize)
+            .or_else(|| {
+                mesh.tri_indices()
+                    .iter()
+                    .zip(&mesh.tri_face)
+                    .filter(|(_, face)| **face == index)
+                    .filter_map(|(triangle, _)| mesh.tri(triangle))
+                    .max_by(|[a, b, c], [x, y, z]| ((*b - *a).cross(*c - *a).len()).total_cmp(&((*y - *x).cross(*z - *x).len())))
+                    .map(|[a, b, c]| (a + b + c) / 3.0)
+            })
             .ok_or_else(|| bad(cmd, "degenerate face"))?;
         picked.push((index as usize, inside));
     }
@@ -477,7 +470,7 @@ pub(super) fn sketch_of_face(s: &mut Session, point: Vec3, cmd: &str, face_body:
     if d > tol * 10.0 {
         return Err(none());
     }
-    let tris: Vec<[Vec3; 3]> = m.triangles.iter().zip(&m.tri_face).filter(|(_, tf)| **tf == f).filter_map(|(t, _)| m.tri(t)).collect();
+    let tris: Vec<[Vec3; 3]> = m.tri_indices().iter().zip(&m.tri_face).filter(|(_, tf)| **tf == f).filter_map(|(t, _)| m.tri(t)).collect();
     let normal = tris.iter().find_map(|[a, b, c]| (*b - *a).cross(*c - *a).normalized()).ok_or_else(|| bad(cmd, "degenerate face"))?;
     if tris.iter().any(|[a, b, c]| (*b - *a).cross(*c - *a).normalized().is_some_and(|n| n.dot(normal) < 1.0 - 1e-6)) {
         return Err(bad(cmd, "only planar faces can be extruded"));

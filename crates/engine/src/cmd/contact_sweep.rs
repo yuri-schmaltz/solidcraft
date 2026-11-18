@@ -86,8 +86,8 @@ pub(crate) struct ContactMeshes(HashMap<u64, ContactMesh>);
 /// Tessellate `body` for contact checks and measure how thin it is.
 fn contact_mesh(body: &solidcraft_doc::ModelBody) -> Result<ContactMesh> {
     let tolerance = (body.body.size() * 1e-3).max(1e-3);
-    let mesh = body.body.mesh(&solidcraft_kernel::MeshTolerance::chord(tolerance))?;
-    if mesh.triangles.len() > MAX_TRIANGLES || mesh.positions.len().saturating_add(mesh.triangles.len().saturating_mul(4)) > 200_000 {
+    let mesh = body.body.display_mesh_at(&solidcraft_kernel::MeshTolerance::chord(tolerance))?;
+    if mesh.tri_indices().len() > MAX_TRIANGLES || mesh.positions.len().saturating_add(mesh.tri_indices().len().saturating_mul(4)) > 200_000 {
         return Err(limit("body exceeds contact sweep tessellation budget"));
     }
     let extent = mesh.bounds().size();
@@ -96,7 +96,7 @@ fn contact_mesh(body: &solidcraft_doc::ModelBody) -> Result<ContactMesh> {
     // Local thin walls of a wider body remain a sampling limitation.
     let mut thickness = extent.x.min(extent.y).min(extent.z);
     let mut directions: Vec<Vec3> = Vec::new();
-    for triangle in &mesh.triangles {
+    for triangle in mesh.tri_indices() {
         let Some([a, b, c]) = mesh.tri(triangle) else {
             return Err(limit("invalid contact tessellation"));
         };
@@ -381,7 +381,7 @@ impl ContactGeometry {
             .map(|body| {
                 let frame = Self::frame(body, s)?;
                 let positions = body.mesh.positions.iter().map(|p| apply_point(&frame, *p)).collect();
-                Ok(Mesh { positions, triangles: body.mesh.triangles.clone(), ..Mesh::default() })
+                Ok(Mesh { positions, triangles: body.mesh.tri_indices().to_vec(), ..Mesh::default() })
             })
             .collect()
     }
@@ -441,7 +441,7 @@ impl ContactGeometry {
             let (pa, pb) = (self.placed_body(a, &frames, &mut placed)?, self.placed_body(b, &frames, &mut placed)?);
             let mesh = |c: &CachedBody, f: &Mat| Mesh {
                 positions: c.mesh.positions.iter().map(|p| apply_point(f, *p)).collect(),
-                triangles: c.mesh.triangles.clone(),
+                triangles: c.mesh.tri_indices().to_vec(),
                 ..Mesh::default()
             };
             let (ma, mb) = (mesh(ca, fa), mesh(cb, fb));
@@ -577,9 +577,9 @@ impl ContactGeometry {
             .positions
             .len()
             // 4 sample points and 3 edges to probe per triangle of `a` against each triangle of `b` (#3323), and the other way round.
-            .saturating_add(ma.triangles.len().saturating_mul(7))
-            .saturating_mul(mb.triangles.len())
-            .saturating_add(mb.positions.len().saturating_add(mb.triangles.len().saturating_mul(7)).saturating_mul(ma.triangles.len()));
+            .saturating_add(ma.tri_indices().len().saturating_mul(7))
+            .saturating_mul(mb.tri_indices().len())
+            .saturating_add(mb.positions.len().saturating_add(mb.tri_indices().len().saturating_mul(7)).saturating_mul(ma.tri_indices().len()));
         *work = work.saturating_add(cost);
         if *work > budget {
             return Err(limit(OUT_OF_COLLISION_WORK));
@@ -607,7 +607,7 @@ impl ContactGeometry {
     /// cost, refused past `budget`.
     pub(super) fn gaps(&self, s: &Session, cutoff: f64, work: &mut usize, budget: usize) -> Result<Vec<Gap>> {
         let meshes = self.placed(s)?;
-        let tris: Vec<Vec<[Vec3; 3]>> = meshes.iter().map(|m| m.triangles.iter().filter_map(|t| m.tri(t)).collect()).collect();
+        let tris: Vec<Vec<[Vec3; 3]>> = meshes.iter().map(|m| m.tri_indices().iter().filter_map(|t| m.tri(t)).collect()).collect();
         let boxes: Vec<Aabb3> = meshes.iter().map(Mesh::bounds).collect();
         let mut trees: Vec<Option<Bvh>> = vec![None; meshes.len()];
         let mut nearest: BTreeMap<(u64, u64), Gap> = BTreeMap::new();

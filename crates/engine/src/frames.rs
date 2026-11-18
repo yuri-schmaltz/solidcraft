@@ -172,8 +172,7 @@ fn frame_at(s: &Session, world: &solidcraft_doc::ModelState, f: &Frames, p: Vec3
     let mut best: Option<(f64, Mat, Vec<String>)> = None;
     for wb in &world.bodies {
         let Some((_, own, m)) = f.bodies(s).iter().find(|(w, _, _)| *w == wb.name) else { continue };
-        let mesh = wb.mesh();
-        let bb = mesh.bounds();
+        let bb = wb.outline_bounds();
         let tol = (bb.diagonal() * 1e-3).max(1e-3);
         if p.x < bb.min.x - tol
             || p.y < bb.min.y - tol
@@ -184,7 +183,10 @@ fn frame_at(s: &Session, world: &solidcraft_doc::ModelState, f: &Frames, p: Vec3
         {
             continue;
         }
-        let d = mesh.triangles.iter().filter_map(|t| mesh.tri(t)).map(|[a, b, c]| tri_dist(p, a, b, c)).fold(f64::INFINITY, f64::min);
+        let d = wb.body.nearest_face(p).map(|(d, _)| d).unwrap_or_else(|| {
+            let mesh = wb.display_mesh();
+            mesh.tri_indices().iter().filter_map(|t| mesh.tri(t)).map(|[a, b, c]| tri_dist(p, a, b, c)).fold(f64::INFINITY, f64::min)
+        });
         if d > tol {
             continue;
         }
